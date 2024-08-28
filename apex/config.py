@@ -29,6 +29,8 @@ class Config:
     email: str = None
     password: str = None
     program_id: int = None
+    job_type: str = "container"
+    platform: str = "ali"
 
     # DispachterExecutor config
     dispatcher_config: dict = None
@@ -50,7 +52,7 @@ class Config:
     remote_password: str = None
     port: int = 22
 
-    # calculator config
+    # basic run config
     run_image_name: str = None
     run_command: str = None
     apex_image_name: str = "zhuoyli/apex_amd64"
@@ -63,8 +65,11 @@ class Config:
     vasp_run_command: str = None
     abacus_image_name: str = None
     abacus_run_command: str = None
+
+    # common APEX config
     is_bohrium_dflow: bool = False
     submit_only: bool = False
+    flow_name: str = None
 
     database_type: str = 'local'
     archive_method: str = 'sync'
@@ -105,8 +110,8 @@ class Config:
                     "password": self.password,
                     "program_id": self.program_id,
                     "input_data": {
-                        "job_type": "container",
-                        "platform": "ali",
+                        "job_type": self.job_type,
+                        "platform": self.platform,
                         "scass_type": self.scass_type,
                     },
                 },
@@ -277,7 +282,7 @@ class Config:
             self,
             dispatcher_config: dict
     ) -> DispatcherExecutor:
-        if not (self.context_type or self.machine):
+        if not (self.context_type or self.machine or self.dispatcher_config):
             executor = None
         else:
             # get arguments for instantiation of the DispatcherExecutor
