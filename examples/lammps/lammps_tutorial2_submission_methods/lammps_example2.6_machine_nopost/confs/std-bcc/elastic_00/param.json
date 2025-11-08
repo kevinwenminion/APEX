@@ -1,0 +1,1 @@
+{"type": "elastic", "norm_deform": 0.01, "shear_deform": 0.01, "cal_setting": {"etol": 0, "ftol": 1e-10, "relax_pos": true, "relax_shape": false, "relax_vol": false}, "conventional": false, "ieee": true, "cal_type": "relaxation"}

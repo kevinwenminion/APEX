@@ -1,0 +1,4 @@
+conf_dir: /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/confs/std-bcc/eos_00
+ VpA(A^3)  EpA(eV)
+  9.493   -6.1652 
+ 15.821  -10.9325 

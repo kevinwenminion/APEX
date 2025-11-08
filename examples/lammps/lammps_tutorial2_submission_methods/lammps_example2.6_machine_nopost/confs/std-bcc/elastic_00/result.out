@@ -1,0 +1,12 @@
+/gauss9/home/cityu/chefan/APEX/examples/lammps_example6/confs/std-bcc/elastic_00
+ 454.97  131.06  131.06    0.00    0.00    0.00 
+ 131.06  454.97  131.06    0.00    0.00    0.00 
+ 131.06  131.06  454.97    0.00    0.00    0.00 
+   0.00    0.00    0.00   95.49    0.00    0.00 
+   0.00    0.00    0.00    0.00   95.49    0.00 
+   0.00    0.00    0.00    0.00    0.00   95.49 
+# Bulk   Modulus BV = 239.03 GPa
+# Shear  Modulus GV = 122.08 GPa
+# Youngs Modulus EV = 312.95 GPa
+# Poission Ratio uV = 0.28
+ 

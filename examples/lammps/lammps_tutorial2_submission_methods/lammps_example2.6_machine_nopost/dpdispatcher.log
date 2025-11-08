@@ -1,0 +1,78 @@
+LOG INIT:dpdispatcher log direct to /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/dpdispatcher.log
+LOG INIT:dpdispatcher log direct to /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/dpdispatcher.log
+LOG INIT:dpdispatcher log direct to /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/dpdispatcher.log
+LOG INIT:dpdispatcher log direct to /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/dpdispatcher.log
+LOG INIT:dpdispatcher log direct to /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/dpdispatcher.log
+LOG INIT:dpdispatcher log direct to /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/dpdispatcher.log
+2025-11-07 21:23:40,075 - INFO : info:check_all_finished: False
+2025-11-07 21:23:40,163 - INFO : job: 09439a78a4e281a78dc7342f100027d52a4d9a71 submit; job_id is 98373
+2025-11-07 21:24:11,658 - INFO : job: 09439a78a4e281a78dc7342f100027d52a4d9a71 98373 finished
+2025-11-07 21:24:11,682 - INFO : find existing /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/confs/std-bcc/relaxation/relax_task/log.lammps, replacing by /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/32bf38013f8df8d32a840293c4df7798b5b20c20/confs/std-bcc/relaxation/relax_task/log.lammps
+2025-11-07 21:24:11,692 - INFO : find existing /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/confs/std-bcc/relaxation/relax_task/dump.relax, replacing by /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/32bf38013f8df8d32a840293c4df7798b5b20c20/confs/std-bcc/relaxation/relax_task/dump.relax
+LOG INIT:dpdispatcher log direct to /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/dpdispatcher.log
+LOG INIT:dpdispatcher log direct to /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/dpdispatcher.log
+2025-11-07 21:25:23,947 - INFO : info:check_all_finished: False
+2025-11-07 21:25:24,134 - INFO : job: 09439a78a4e281a78dc7342f100027d52a4d9a71 submit; job_id is 98374
+2025-11-07 21:25:55,479 - INFO : job: 09439a78a4e281a78dc7342f100027d52a4d9a71 98374 finished
+LOG INIT:dpdispatcher log direct to /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/dpdispatcher.log
+LOG INIT:dpdispatcher log direct to /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/dpdispatcher.log
+LOG INIT:dpdispatcher log direct to /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/dpdispatcher.log
+LOG INIT:dpdispatcher log direct to /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/dpdispatcher.log
+2025-11-07 21:31:02,963 - INFO : info:check_all_finished: False
+2025-11-07 21:31:03,016 - INFO : job: d3dba0494ce31294de5c885a63868cbd6f543d66 submit; job_id is 98375
+2025-11-07 21:31:03,179 - INFO : job: 37191f338bc3e26d43d61fe4daf3a60c8219d56e submit; job_id is 98376
+2025-11-07 21:31:03,688 - INFO : info:check_all_finished: False
+2025-11-07 21:31:03,837 - INFO : job: 223073eebc51d3c8629bbe55e7dc36f4419c3d55 submit; job_id is 98377
+2025-11-07 21:31:03,951 - INFO : job: 79da92ce60ee550860b2cf0171a974a0f8e695b7 submit; job_id is 98378
+2025-11-07 21:31:04,084 - INFO : job: 53131fdee4807bddfce9a632e0e42379f9d88c8f submit; job_id is 98379
+2025-11-07 21:31:04,155 - INFO : job: 03c8e2135813b7077a664e1005d15aad06e3b9e9 submit; job_id is 98380
+2025-11-07 21:31:04,291 - INFO : job: d399f0c031fe5f9d8d1833c488a1fe9ef2115016 submit; job_id is 98381
+2025-11-07 21:31:04,400 - INFO : job: c783a10b1e926f1775cd488be1ec9ca19a4793be submit; job_id is 98382
+2025-11-07 21:31:04,489 - INFO : job: 23377ef8461ffa779c3438d71309fed014672f68 submit; job_id is 98383
+2025-11-07 21:31:04,552 - INFO : job: 3bbcbcb3c5034bc52c811c4b7477a43eda43a3b9 submit; job_id is 98384
+2025-11-07 21:31:04,641 - INFO : job: 54f174d97bad481bac823129fc2e72659a1bbc14 submit; job_id is 98385
+2025-11-07 21:31:04,698 - INFO : job: 766e790e546dff4a165aa256ad320a2d5e18639f submit; job_id is 98386
+2025-11-07 21:31:04,794 - INFO : job: d3dba0494ce31294de5c885a63868cbd6f543d66 submit; job_id is 98387
+2025-11-07 21:31:04,863 - INFO : job: 9ced0d1d42f2257187911bdca325ccbcf48858cc submit; job_id is 98388
+2025-11-07 21:31:04,927 - INFO : job: 4a1b94d327d2f8a3185170878df0604bd93f39f9 submit; job_id is 98389
+2025-11-07 21:31:05,016 - INFO : job: 9aaf97461d9cb5224737d8829496d9e2d6801298 submit; job_id is 98390
+2025-11-07 21:31:05,067 - INFO : job: e3fb235d07741ad2f88cf6cecf8babd20a6f1490 submit; job_id is 98391
+2025-11-07 21:31:05,150 - INFO : job: f9ed646278955e360bf8cd7883780aa19757c354 submit; job_id is 98392
+2025-11-07 21:31:05,235 - INFO : job: e7fd8ac8f7671412faba346d71579920cd4f20e0 submit; job_id is 98393
+2025-11-07 21:31:05,303 - INFO : job: 608fc6d4888f580b144391acb4df0b13b1e8406a submit; job_id is 98394
+2025-11-07 21:31:05,417 - INFO : job: b63677014f3c59e055717559d24958464d3452c6 submit; job_id is 98395
+2025-11-07 21:31:05,482 - INFO : job: 9d190199c0ac4f1331440a4ee7b4c3e12139f574 submit; job_id is 98396
+2025-11-07 21:31:05,586 - INFO : job: c580e887fa6cd93a80bf53a54442c25cba859da9 submit; job_id is 98397
+2025-11-07 21:31:05,644 - INFO : job: 37191f338bc3e26d43d61fe4daf3a60c8219d56e submit; job_id is 98398
+2025-11-07 21:31:05,737 - INFO : job: 680b86662faa6754e69e2eed41dedf3120672bc4 submit; job_id is 98399
+2025-11-07 21:31:05,814 - INFO : job: a2e9e9f845a51e1e7015c83988d4fd868f31199a submit; job_id is 98400
+2025-11-07 21:31:34,538 - INFO : job: d3dba0494ce31294de5c885a63868cbd6f543d66 98375 finished
+2025-11-07 21:31:34,616 - INFO : job: 37191f338bc3e26d43d61fe4daf3a60c8219d56e 98376 finished
+2025-11-07 21:31:41,518 - INFO : job: 223073eebc51d3c8629bbe55e7dc36f4419c3d55 98377 finished
+2025-11-07 21:31:41,707 - INFO : job: 79da92ce60ee550860b2cf0171a974a0f8e695b7 98378 finished
+2025-11-07 21:31:41,879 - INFO : job: 53131fdee4807bddfce9a632e0e42379f9d88c8f 98379 finished
+2025-11-07 21:31:42,116 - INFO : job: 03c8e2135813b7077a664e1005d15aad06e3b9e9 98380 finished
+2025-11-07 21:31:42,321 - INFO : job: d399f0c031fe5f9d8d1833c488a1fe9ef2115016 98381 finished
+2025-11-07 21:31:42,500 - INFO : job: c783a10b1e926f1775cd488be1ec9ca19a4793be 98382 finished
+2025-11-07 21:31:42,659 - INFO : job: 23377ef8461ffa779c3438d71309fed014672f68 98383 finished
+2025-11-07 21:31:42,771 - INFO : job: 3bbcbcb3c5034bc52c811c4b7477a43eda43a3b9 98384 finished
+2025-11-07 21:31:42,929 - INFO : job: 54f174d97bad481bac823129fc2e72659a1bbc14 98385 finished
+2025-11-07 21:31:43,160 - INFO : job: 766e790e546dff4a165aa256ad320a2d5e18639f 98386 finished
+2025-11-07 21:31:43,367 - INFO : job: d3dba0494ce31294de5c885a63868cbd6f543d66 98387 finished
+2025-11-07 21:31:43,541 - INFO : job: 9ced0d1d42f2257187911bdca325ccbcf48858cc 98388 finished
+2025-11-07 21:31:43,772 - INFO : job: 4a1b94d327d2f8a3185170878df0604bd93f39f9 98389 finished
+2025-11-07 21:31:44,020 - INFO : job: 9aaf97461d9cb5224737d8829496d9e2d6801298 98390 finished
+2025-11-07 21:31:44,213 - INFO : job: e3fb235d07741ad2f88cf6cecf8babd20a6f1490 98391 finished
+2025-11-07 21:31:44,330 - INFO : job: f9ed646278955e360bf8cd7883780aa19757c354 98392 finished
+2025-11-07 21:31:44,596 - INFO : job: e7fd8ac8f7671412faba346d71579920cd4f20e0 98393 finished
+2025-11-07 21:31:44,839 - INFO : job: 608fc6d4888f580b144391acb4df0b13b1e8406a 98394 finished
+2025-11-07 21:31:45,017 - INFO : job: b63677014f3c59e055717559d24958464d3452c6 98395 finished
+2025-11-07 21:31:45,192 - INFO : job: 9d190199c0ac4f1331440a4ee7b4c3e12139f574 98396 finished
+2025-11-07 21:31:45,414 - INFO : job: c580e887fa6cd93a80bf53a54442c25cba859da9 98397 finished
+2025-11-07 21:31:45,597 - INFO : job: 37191f338bc3e26d43d61fe4daf3a60c8219d56e 98398 finished
+2025-11-07 21:31:45,772 - INFO : job: 680b86662faa6754e69e2eed41dedf3120672bc4 98399 finished
+2025-11-07 21:31:46,004 - INFO : job: a2e9e9f845a51e1e7015c83988d4fd868f31199a 98400 finished
+LOG INIT:dpdispatcher log direct to /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/dpdispatcher.log
+LOG INIT:dpdispatcher log direct to /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/dpdispatcher.log
+LOG INIT:dpdispatcher log direct to /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/dpdispatcher.log
+LOG INIT:dpdispatcher log direct to /gauss9/home/cityu/chefan/APEX/examples/lammps_example6/dpdispatcher.log
