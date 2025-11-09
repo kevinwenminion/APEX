@@ -55,8 +55,8 @@ APEX currently offers calculation methods for the following alloy properties:
 - [Detailed Parameter Reference](#detailed-parameter-reference)
 - [More Resources](#more-resources)
 
-## Installation Options
-### Install APEX
+## 1.Installation
+### 1.1. Install APEX
 
 There are two ways to install APEX:
 
@@ -73,7 +73,7 @@ There are two ways to install APEX:
   pip install .
   ```
 
-### 2.2. Install Argo
+### 1.2. Install Argo
 
 APEX recommends integrating [Argo](https://argoproj.github.io/workflows/) workflow engine for enhanced automation and visualization.
 
@@ -94,7 +94,7 @@ Once enabled, access the workflow dashboard at `http://127.0.0.1:2746`.
 
 
 ---
-## 3. Quick Start
+## 2. Quick Start
 
 To submit an APEX workflow, you need to organize three essential components in your working directory:
 
@@ -104,7 +104,7 @@ To submit an APEX workflow, you need to organize three essential components in y
 
 We present a quick example using a [LAMMPS_example](./examples/lammps/lammps_tutorial1_quick_start/lammps_example1.1_Mo) to compute the Equation of State (EOS) and elastic constants of molybdenum (Mo) metal in both Body-Centered Cubic (BCC) phase.
 
-### 3.1. Work Directory Structure
+### 2.1. Work Directory Structure
 
 Create your working directory with the following structure:
 
@@ -130,7 +130,7 @@ lammps_demo/
 
 - **`global_bohrium.json`**: Provides computing resource information for Bohrium cloud platform execution.
 
-### 3.2. Calculation Parameter Files
+### 2.2. Calculation Parameter Files
 
 Calculation parameter files define what properties to compute and with what parameters.
 
@@ -169,7 +169,7 @@ This file contains parameters for geometry optimization, structure relaxation an
 }
 ```
 
-### 3.3. Global Configuration Files
+### 2.3. Global Configuration Files
 
 Global configuration files specify where and how your workflows should be executed.
 
@@ -195,7 +195,7 @@ Create `global_bohrium.json` to submit workflows to the Bohrium cloud platform:
 
 <span style="color: red">**Important:** Replace `YOUR_EMAIL`, `YOUR_PASSWD` and `program_id` with your own Bohrium account credentials.</span>
 
-### 3.4. Submit Your First Workflow
+### 2.4. Submit Your First Workflow
 
 Once you have prepared all necessary files and configuration, submit your workflow using the Bohrium platform (as shown in the Quick Start example):
 
@@ -205,7 +205,7 @@ apex submit param_joint.json -c global_bohrium.json
 
 Monitor the workflow progress at https://workflows.deepmodeling.com.
 
-### 3.5. Check Your Results
+### 2.5. Check Your Results
 After the job is finished, you can check your results by:
 
 ```shell
@@ -216,7 +216,8 @@ apex report
 
 
 
-## Execution Backends
+## 3. User menu
+### 3.1. Execution Backends
 
 APEX builds on [dflow](https://github.com/deepmodeling/dflow) to orchestrate cloud-native workflows. Choose the backend that matches your infrastructure:
 
@@ -225,7 +226,7 @@ APEX builds on [dflow](https://github.com/deepmodeling/dflow) to orchestrate clo
 - **Remote HPC via DPDispatcher**: Define SSH credentials, scheduler options, and resource requirements inside your global config. APEX hands off the `run` step to DPDispatcher to submit jobs to Slurm or other supported schedulers.
 - **Bohrium cloud**: Leverage the managed Argo service and curated container images on [Bohrium](https://bohrium.dp.tech). You only need valid account credentials and program ID.
 
-## Prepare Your Input Files
+### 3.2 Prepare Your Input Files
 
 Every submission needs three pieces:
 
@@ -251,7 +252,7 @@ lammps_demo
 └── param_relax.json
 ```
 
-### Calculation parameter file types
+### 3.3 Calculation parameter file types
 
 | Type | File format | Required dictionaries | Typical use |
 |------|-------------|-----------------------|-------------|
@@ -261,7 +262,7 @@ lammps_demo
 
 Paths in these files should be relative to the work directory. The examples above cover standard Deep Potential workflows; see `docs/Hands_on_auto-test.pdf` for a complete walk-through.
 
-## Submit and Monitor Workflows
+### 3.4 Submit and Monitor Workflows
 
 APEX chooses the workflow type from the parameter files you provide:
 
@@ -290,7 +291,7 @@ Common management commands:
 | `apex resume -i <id>` | Resume a suspended workflow. |
 | `apex stop -i <id>` / `apex suspend -i <id>` / `apex terminate -i <id>` | Control workflow execution. |
 
-## Run Individual Steps
+### 3.5 Run Individual Steps
 
 For fine-grained debugging you can execute single steps locally via `apex do`:
 
@@ -309,7 +310,7 @@ For fine-grained debugging you can execute single steps locally via `apex do`:
 
 The same pattern applies to property calculations (`make_props`, `run_props`, `post_props`).
 
-## After Submission
+### 3.6 After Submission
 
 - **Manual retrieval**  
   ```shell
@@ -331,9 +332,9 @@ The same pattern applies to property calculations (`make_props`, `run_props`, `p
 
 
 
-## Detailed Parameter Reference
+## 4. Detailed Parameter Reference
 
-### Global configuration (`global*.json`)
+### 4.1 Global configuration (`global*.json`)
 
 #### Basic config
 
@@ -384,7 +385,7 @@ The same pattern applies to property calculations (`make_props`, `run_props`, `p
 | `program_id` | Integer | `None` | Bohrium program ID. |
 | `scass_type` | String | `None` | Bohrium node type. |
 
-### Calculation parameters (`param*.json`)
+### 4.2. Calculation parameters (`param*.json`)
 
 The JSON schema inherits from `dpgen.autotest`. Below are example snippets for each workflow type:
 
