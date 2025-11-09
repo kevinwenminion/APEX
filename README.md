@@ -212,7 +212,7 @@ After the job is finished, you can check your results by:
 apex report
 ```
 
-For other submission methods (local Argo, HPC clusters, debug mode), please refer to [Lammps_tutorial](#./examples/lammps_example2).
+For other submission methods (local Argo, HPC clusters, debug mode), please refer to [Lammps_tutorial](#./examples/lammps).
 
 
 
