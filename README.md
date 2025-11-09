@@ -102,7 +102,7 @@ To submit an APEX workflow, you need to organize three essential components in y
 2. **Calculation parameter files** specifying what to compute
 3. **Global configuration files** specifying where and how to compute
 
-We present a quick example using a [LAMMPS_example](./examples/lammps_example1) to compute the Equation of State (EOS) and elastic constants of molybdenum (Mo) metal in both Body-Centered Cubic (BCC) phase.
+We present a quick example using a [LAMMPS_example](./examples/lammps/lammps_tutorial1_quick_start/lammps_example1.1_Mo) to compute the Equation of State (EOS) and elastic constants of molybdenum (Mo) metal in both Body-Centered Cubic (BCC) phase.
 
 ### 3.1. Work Directory Structure
 
@@ -212,7 +212,7 @@ After the job is finished, you can check your results by:
 apex report
 ```
 
-For other submission methods (local Argo, HPC clusters, debug mode), please refer to [Lammps_tutorial](#./examples/lammps/apex_tutorial_en.md).
+For other submission examples, please refer to [Lammps_tutorial](./examples/lammps/apex_tutorial_en.md).
 
 
 
