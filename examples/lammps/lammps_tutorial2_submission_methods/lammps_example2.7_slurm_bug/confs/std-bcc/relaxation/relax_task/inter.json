@@ -1,7 +1,0 @@
-{
-    "type": "deepmd",
-    "model": "frozen_model.pb",
-    "type_map": {
-        "Mo": 0
-    }
-}
