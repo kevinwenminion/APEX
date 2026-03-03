@@ -108,14 +108,6 @@ Bohrium platform provides pre-configured environments, automated scheduling, and
 
 ```json
 {
-    "dflow_host": "https://workflows.deepmodeling.com",
-    "k8s_api_server": "https://workflows.deepmodeling.com",
-    "batch_type": "Bohrium",
-    "context_type": "Bohrium",
-    "email": "your_email@example.com",
-    "password": "your_password",
-    "program_id": 12345,
-    "apex_image_name": "registry.dp.tech/dptech/prod-11045/apex-dependency:1.2.0",
     "lammps_image_name": "registry.dp.tech/dptech/prod-11045/deepmdkit-phonolammps:3.1.1",
     "lammps_run_command": "lmp -in in.lammps",
     "scass_type": "c8_m31_1 * NVIDIA T4"
@@ -124,7 +116,7 @@ Bohrium platform provides pre-configured environments, automated scheduling, and
 
 #### Key Parameters
 
-- **Authentication**: Email, password, and Bohrium program ID
+- **Authentication**: Configure once with `apex account` (or set these keys directly in json)
 - **Images**: APEX and LAMMPS Docker images (check [Bohrium Registry](https://www.bohrium.com/web-images/public))
 - **Resources**: `scass_type` specifies CPU cores, memory, and GPU (check [Bohrium Profiler](https://www.bohrium.com/profiler))
 
@@ -343,7 +335,7 @@ APEX supports:
     "properties": [
         {
             "type": "eos",
-            "skip": false,
+            "req_calc": true,
             "vol_start": 0.6,
             "vol_end": 1.4,
             "vol_step": 0.1
@@ -377,25 +369,25 @@ APEX supports:
         },
         {
             "type": "elastic",
-            "skip": false
+            "req_calc": true
         },
         {
             "type": "surface",
-            "skip": true
+            "req_calc": false
         },
         {
             "type": "vacancy",
-            "skip": true,
+            "req_calc": false,
             "supercell": [2, 2, 2]
         },
         {
             "type": "interstitial",
-            "skip": true,
+            "req_calc": false,
             "insert_ele": ["Al"]
         },
         {
             "type": "gamma",
-            "skip": true,
+            "req_calc": false,
             "plane_miller": [1, 1, 1],
             "slip_direction": [1, 1, -2]
         }
@@ -437,9 +429,13 @@ apex submit -d param_props_meam.json -c global_local_debug.json
 
 #### Controlling Calculations
 
-Use `"skip": true/false` to enable/disable properties:
-- `"skip": false`: Calculate property
-- `"skip": true`: Skip property
+Use `"req_calc": true/false` to enable/disable properties:
+- `"req_calc": true`: Calculate property
+- `"req_calc": false`: Skip property
+
+Default behavior:
+- Property block not present in `properties`: not calculated
+- Property block present without `req_calc`: calculated (default `true`)
 
 Simply delete unused property blocks to simplify the configuration.
 

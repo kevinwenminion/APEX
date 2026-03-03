@@ -3,9 +3,9 @@
 </div>
 
 # APEX: Alloy Property EXplorer
-[![](https://img.shields.io/badge/release-1.2.0-blue.svg)](https://github.com/deepmodeling/APEX)
+[![](https://img.shields.io/badge/release-1.2.1-blue.svg)](https://github.com/deepmodeling/APEX)
 
-
+[1.2.1 Changelog](./CHANGELOG-1.2.1.md)
 
 [APEX](https://github.com/deepmodeling/APEX) helps materials scientists build reliable alloy property workflows that run on local machines, on-premises clusters, or the Bohrium cloud. It refactors the [DP-GEN](https://github.com/deepmodeling/dpgen) `auto_test` module into a flexible, dflow-powered Python package that prepares tasks, dispatches calculations, monitors progress, and collects results for calculators such as **LAMMPS**, **VASP**, and **ABACUS**.
 
@@ -52,6 +52,8 @@ APEX currently offers calculation methods for the following alloy properties:
   - [3.4 Submit and Monitor Workflows](#34-submit-and-monitor-workflows)
   - [3.5 Run Individual Steps](#35-run-individual-steps)
   - [3.6 After Submission](#36-after-submission)
+  - [3.7 Graphical Interface (GUI)](#37-graphical-interface-gui)
+  - [3.8 Bohrium Account Defaults](#38-bohrium-account-defaults)
 - [4. Detailed Parameter Reference](#4-detailed-parameter-reference)
   - [4.1 Global Configuration](#41-global-configuration-globaljson)
   - [4.2 Calculation Parameters](#42-calculation-parameters-paramjson)
@@ -173,21 +175,27 @@ Create `global_bohrium.json` to submit workflows to the Bohrium cloud platform:
 
 ```json
 {
-  "dflow_host": "https://workflows.deepmodeling.com",
-  "k8s_api_server": "https://workflows.deepmodeling.com",
-  "batch_type": "Bohrium",
-  "context_type": "Bohrium",
-  "email": "YOUR_EMAIL",
-  "password": "YOUR_PASSWD",
-  "program_id": 1234,
-  "apex_image_name":"registry.dp.tech/dptech/prod-11045/apex-dependency:1.2.0",
   "lammps_image_name": "registry.dp.tech/dptech/prod-11045/deepmdkit-phonolammps:2.1.1",
   "lammps_run_command":"lmp -in in.lammps",
   "scass_type":"c8_m31_1 * NVIDIA T4"
 }
 ```
 
-<span style="color: red">**Important:** Replace `YOUR_EMAIL`, `YOUR_PASSWD` and `program_id` with your own Bohrium account credentials.</span>
+APEX now injects Bohrium defaults automatically (`dflow_host`, `k8s_api_server`, `batch_type`, `context_type`, `apex_image_name`).
+
+Save your Bohrium account once in `~/.apex/account.json`:
+
+```shell
+apex account
+```
+
+Or set it directly:
+
+```shell
+apex account --email YOUR_EMAIL --password YOUR_PASSWD --program-id 1234
+```
+
+When running `apex submit -c global_bohrium.json`, values in your json file still have highest priority and override the saved defaults.
 
 ### 2.4. Submit Your First Workflow
 
@@ -324,6 +332,49 @@ The same pattern applies to property calculations (`make_props`, `run_props`, `p
   ```
   Launch a Dash app (http://127.0.0.1:8050/) to explore multiple result sets side-by-side.
 
+### 3.7 Graphical Interface (GUI)
+
+APEX also provides a web GUI for common CLI operations (submit, list/get/retry/resume, retrieve, etc.):
+
+```shell
+apex gui [-H HOST] [-p PORT] [--no-browser]
+```
+
+- Default URL: `http://127.0.0.1:8060/`
+- The GUI has three tabs:
+  - **Submit**: build and run `apex submit` without typing full CLI flags
+  - **Manage**: run frequent workflow-management commands
+  - **Advanced**: run custom command tails (except `gui`/`report`, which are blocked to avoid nested Dash servers)
+
+### 3.8 Bohrium Account Defaults
+
+Use `apex account` to store Bohrium credentials globally (default path: `~/.apex/account.json`):
+
+```shell
+# interactive mode
+apex account
+
+# non-interactive mode
+apex account --email YOUR_EMAIL --password YOUR_PASSWD --program-id 1234
+```
+
+Useful commands:
+
+```shell
+apex account --show
+apex account --reset
+```
+
+When you run `apex submit -c global_bohrium.json`, APEX auto-fills these defaults if missing:
+
+- `dflow_host`: `https://workflows.deepmodeling.com`
+- `k8s_api_server`: `https://workflows.deepmodeling.com`
+- `batch_type`: `Bohrium`
+- `context_type`: `Bohrium`
+- `apex_image_name`: `registry.dp.tech/dptech/prod-11045/apex-dependency:1.2.0`
+
+Priority rule: values in your `-c` json file override account defaults.
+
 
 
 ## 4. Detailed Parameter Reference
@@ -379,6 +430,8 @@ The same pattern applies to property calculations (`make_props`, `run_props`, `p
 | `program_id` | Integer | `None` | Bohrium program ID. |
 | `scass_type` | String | `None` | Bohrium node type. |
 
+> Note: in Bohrium workflows, these fields can be stored in `~/.apex/account.json` via `apex account`.
+
 ### 4.2. Calculation parameters (`param*.json`)
 
 The JSON schema inherits from `dpgen.autotest`. Below are example snippets for each workflow type:
@@ -415,7 +468,7 @@ The JSON schema inherits from `dpgen.autotest`. Below are example snippets for e
     "properties": [
       {
         "type": "eos",
-        "skip": false,
+        "req_calc": true,
         "vol_start": 0.6,
         "vol_end": 1.4,
         "vol_step": 0.1,
@@ -423,7 +476,7 @@ The JSON schema inherits from `dpgen.autotest`. Below are example snippets for e
       },
       {
         "type": "elastic",
-        "skip": false,
+        "req_calc": true,
         "norm_deform": 1e-2,
         "shear_deform": 1e-2,
         "cal_setting": {"etol": 0, "ftol": 1e-10}
@@ -452,7 +505,7 @@ The JSON schema inherits from `dpgen.autotest`. Below are example snippets for e
     "properties": [
       {
         "type": "eos",
-        "skip": false,
+        "req_calc": true,
         "vol_start": 0.6,
         "vol_end": 1.4,
         "vol_step": 0.1,
@@ -460,7 +513,7 @@ The JSON schema inherits from `dpgen.autotest`. Below are example snippets for e
       },
       {
         "type": "elastic",
-        "skip": false,
+        "req_calc": true,
         "norm_deform": 1e-2,
         "shear_deform": 1e-2,
         "cal_setting": {"etol": 0, "ftol": 1e-10}
@@ -468,6 +521,11 @@ The JSON schema inherits from `dpgen.autotest`. Below are example snippets for e
     ]
   }
   ```
+
+Property selection behavior:
+- If a property block is not present in `properties`, it is not calculated.
+- If a property block is present and `req_calc` is omitted, it is calculated by default.
+- Set `"req_calc": false` to explicitly disable that property.
 
 ### 4.3 EOS
 
@@ -590,7 +648,7 @@ Example:
 ```json
 {
   "type": "gamma",
-  "skip": true,
+  "req_calc": false,
   "plane_miller": [0, 0, 1],
   "slip_direction": [1, 0, 0],
   "hcp": {

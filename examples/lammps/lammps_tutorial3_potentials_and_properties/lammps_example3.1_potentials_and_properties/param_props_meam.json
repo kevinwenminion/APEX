@@ -8,7 +8,7 @@
     "properties": [
         {
          "type":         "eos",
-         "skip":         false,
+         "req_calc":     true,
          "vol_start":    0.6,
          "vol_end":      1.4,
          "vol_step":     0.4,
@@ -45,7 +45,7 @@
         },
         {
          "type":         "elastic",
-	    "skip":         false,
+	    "req_calc":     true,
          "norm_deform":  1e-2,
          "shear_deform": 1e-2,
 	    "cal_setting":  {"etol": 0,
@@ -53,7 +53,7 @@
         },
 	{
          "type":           "surface",
-         "skip":         true,
+         "req_calc":     false,
          "min_slab_size":  10,
          "min_vacuum_size":11,
          "max_miller":     2,
@@ -61,18 +61,18 @@
         },
 	{
          "type":         "interstitial",
-         "skip":         true,
+         "req_calc":     false,
          "supercell":   [2, 2, 2],
          "insert_ele":  ["Al"]
         },
 	{
          "type":             "vacancy",
-         "skip":         true,
+         "req_calc":     false,
          "supercell":        [2, 2, 2]
         },
 	{
 	  "type":            "gamma",
-	  "skip":            true,
+	  "req_calc":        false,
       "plane_miller":    [1,1,1],
       "slip_direction":  [1,1,-2],
       "supercell_size":   [2,2,100],
@@ -82,4 +82,3 @@
 	}
         ]
 }
-

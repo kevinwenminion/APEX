@@ -14,7 +14,7 @@
   "properties": [
       {
         "type":         "elastic",
-        "skip":         false,
+        "req_calc": true,
         "norm_deform":  1e-2,
         "shear_deform": 1e-2,
         "cal_setting":  {"etol": 0,
