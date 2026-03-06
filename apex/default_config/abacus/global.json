@@ -1,0 +1,5 @@
+{
+    "abacus_image_name":"registry.dp.tech/dptech/abacus:3.2.3",
+    "abacus_run_command":"mpirun -n 32 abacus",
+    "scass_type":"c64_m128_cpu"
+}

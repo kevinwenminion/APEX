@@ -199,8 +199,8 @@ class PropsPost(OP):
         prop = make_property_instance(prop_param, inter_param)
         param_json = os.path.join(abs_path_to_prop, "param.json")
         param_dict = prop.parameter
-        param_dict.setdefault("skip", False) # default of "skip" is False
-        param_dict.pop("skip")
+        param_dict.pop("skip", None)
+        param_dict.pop("req_calc", None)
         dumpfn(param_dict, param_json)
         prop.compute(
             os.path.join(abs_path_to_prop, "result.json"),

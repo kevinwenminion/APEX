@@ -139,7 +139,11 @@ def recursive_search(directories, path='.'):
 
 
 def handle_prop_suffix(parameter: dict):
-    if parameter.get('skip', False):
+    # Prefer req_calc as the explicit switch for running a property.
+    if "req_calc" in parameter:
+        if not parameter.get("req_calc"):
+            return None, None
+    elif parameter.get("skip", False):
         return None, None
     if 'init_from_suffix' and 'output_suffix' in parameter:
         do_refine = True

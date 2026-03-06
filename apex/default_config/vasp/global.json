@@ -1,0 +1,6 @@
+{
+    "group_size": 1,
+    "vasp_image_name":"registry.dp.tech/dptech/vasp:5.4.4-dflow",
+    "vasp_run_command":"bash -c \"source /opt/intel/oneapi/setvars.sh && ulimit -s unlimited && mpirun -n 32 /opt/vasp.5.4.4/bin/vasp_std \"",
+    "scass_type":"c32_m64_cpu"
+}

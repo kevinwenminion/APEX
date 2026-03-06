@@ -341,10 +341,20 @@ apex gui [-H HOST] [-p PORT] [--no-browser]
 ```
 
 - Default URL: `http://127.0.0.1:8060/`
-- The GUI has three tabs:
-  - **Submit**: build and run `apex submit` without typing full CLI flags
-  - **Manage**: run frequent workflow-management commands
+- The GUI has four tabs:
+  - **Submit**: simplified generator for `param.json` + `global.json`, then launch background submit:
+    `nohup apex submit param.json -c global.json > apex.log 2>&1 &`
+    (supports fixed element slots plus an extra-element input for larger `interaction.type_map`)
+    (the generated `param.json` is merged from profile-specific `param_structure.json` + `param_relax.json` + `param_props.json`,
+    and property checkboxes follow the selected profile)
+    (now also merges profile `param_interaction/param_interaction.json`; for VASP/ABACUS you can edit interaction rows in table form,
+    and default `INCAR`/`INPUT` files are auto-created from template when needed)
+    (interaction table now supports dynamic add/remove rows; ABACUS uses a third `orb_file` column)
+    (VASP/ABACUS also provide an `INCAR`/`INPUT` text editor in GUI; its content is written to the target file on submit)
+  - **Manage**: tail and refresh `apex.log` for background submit status
   - **Advanced**: run custom command tails (except `gui`/`report`, which are blocked to avoid nested Dash servers)
+  - **Account**: overwrite Bohrium account fields (`email`/`program_id`/`password`) backed by `apex account` storage;
+    password is never displayed in GUI (only "set/unset" status)
 
 ### 3.8 Bohrium Account Defaults
 

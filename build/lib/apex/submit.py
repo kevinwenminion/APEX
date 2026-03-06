@@ -27,6 +27,41 @@ from apex.utils import (
 )
 
 
+def validate_submit_paths(parameter_dicts: List[dict]) -> None:
+    """
+    dflow rejects input paths containing '.' in these fields.
+    Validate before submit and fail fast with actionable hints.
+    """
+    violations = []
+    for idx, param in enumerate(parameter_dicts):
+        structures = param.get("structures", [])
+        for s_idx, structure in enumerate(structures):
+            if isinstance(structure, str) and "." in structure:
+                violations.append(
+                    f"parameter[{idx}].structures[{s_idx}] = {structure}"
+                )
+
+        interaction = param.get("interaction", {})
+        model = interaction.get("model")
+        if isinstance(model, str):
+            if "." in model:
+                violations.append(f"parameter[{idx}].interaction.model = {model}")
+        elif isinstance(model, list):
+            for m_idx, model_item in enumerate(model):
+                if isinstance(model_item, str) and "." in model_item:
+                    violations.append(
+                        f"parameter[{idx}].interaction.model[{m_idx}] = {model_item}"
+                    )
+
+    if violations:
+        raise RuntimeError(
+            "Invalid `apex submit` paths: dflow does not allow '.' in "
+            "`structures` or `interaction.model`. "
+            "Please rename the path/file and update param.json.\n"
+            "Offending entries:\n- " + "\n- ".join(violations)
+        )
+
+
 def pack_upload_dir(
         work_dir: os.PathLike,
         upload_dir: os.PathLike,
@@ -333,6 +368,8 @@ def submit_workflow(
     is_debug=False,
     labels=None
 ):
+    validate_submit_paths(parameter_dicts)
+
     # config dflow_config and s3_config
     wf_config = Config(**config_dict)
     Config.config_dflow(wf_config.dflow_config_dict)

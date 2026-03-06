@@ -4,16 +4,7 @@ from multiprocessing import Pool
 from monty.serialization import dumpfn, loadfn
 
 from apex.core.calculator.calculator import make_calculator
-from apex.core.property.Elastic import Elastic
-from apex.core.property.EOS import EOS
-from apex.core.property.Cohesive import Cohesive
-from apex.core.property.Gamma import Gamma
-from apex.core.property.Interstitial import Interstitial
-from apex.core.property.Surface import Surface
-from apex.core.property.Vacancy import Vacancy
-from apex.core.property.Phonon import Phonon
-from apex.core.property.Decohesive import Decohesive
-from apex.core.property.FiniteTlatt import FiniteTlatt
+from apex.core.property.factory import make_property_instance
 from apex.core.lib.utils import create_path
 from apex.core.lib.util import collect_task
 from apex.core.lib.dispatcher import make_submission
@@ -22,34 +13,6 @@ from dflow.python import upload_packages
 upload_packages.append(__file__)
 
 lammps_task_type = ['deepmd', 'eam_alloy', 'meam', 'eam_fs', 'meam_spline', 'snap', 'gap', 'rann', 'mace']
-
-def make_property_instance(parameters, inter_param):
-    """
-    Make an instance of Property
-    """
-    prop_type = parameters["type"]
-    if prop_type == "eos":
-        return EOS(parameters, inter_param)
-    elif prop_type == "cohesive":
-        return Cohesive(parameters, inter_param)
-    elif prop_type == "elastic":
-        return Elastic(parameters, inter_param)
-    elif prop_type == "vacancy":
-        return Vacancy(parameters, inter_param)
-    elif prop_type == "interstitial":
-        return Interstitial(parameters, inter_param)
-    elif prop_type == "surface":
-        return Surface(parameters, inter_param)
-    elif prop_type == "gamma":
-        return Gamma(parameters, inter_param)
-    elif prop_type == "phonon":
-        return Phonon(parameters, inter_param)
-    elif prop_type == "decohesive":
-        return Decohesive(parameters, inter_param)
-    elif prop_type == "finitetlatt":
-        return FiniteTlatt(parameters, inter_param)
-    else:
-        raise RuntimeError(f"unknown APEX type {prop_type}")
 
 
 def make_property(confs, inter_param, property_list):
@@ -253,11 +216,8 @@ def post_property(confs, inter_param, property_list):
             prop = make_property_instance(jj, inter_param_prop)
             param_json = os.path.join(path_to_work, "param.json")
             param_dict = prop.parameter
-            param_dict.setdefault("skip", False) # default of "skip" is False
-            try:
-                param_dict.pop("skip")
-            except KeyError:
-                pass
+            param_dict.pop("skip", None)
+            param_dict.pop("req_calc", None)
             dumpfn(param_dict, param_json)
             rerun_finished = jj.get("rerun_finished", True)
             result_json = os.path.join(path_to_work, "result.json")

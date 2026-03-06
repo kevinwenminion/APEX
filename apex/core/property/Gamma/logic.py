@@ -452,7 +452,7 @@ class Gamma(Property):
         with open(inLammps, "r") as fin1:
             contents = fin1.readlines()
             for ii in range(len(contents)):
-                upper = re.search("variable        N equal count\(all\)", contents[ii])
+                upper = re.search(r"variable        N equal count\(all\)", contents[ii])
                 lower = re.search("min_style       cg", contents[ii])
                 if lower:
                     lower_id = ii
@@ -508,7 +508,7 @@ class Gamma(Property):
                 + str(self.displace_direction)
             )
             """
-            ptr_data += "No_task: \tDisplacement \tDisplace_Length(\AA) \tStacking_Fault_E(J/m^2) EpA(eV) slab_equi_EpA(eV)\n"
+            ptr_data += "No_task: \tDisplacement \tDisplace_Length(\\AA) \tStacking_Fault_E(J/m^2) EpA(eV) slab_equi_EpA(eV)\n"
             all_tasks.sort()
             n_steps = len(all_tasks) - 1
             task_result_slab_equi = loadfn(os.path.join(all_tasks[0], "result_task.json"))

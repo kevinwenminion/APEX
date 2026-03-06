@@ -36,6 +36,16 @@ Release date: 2026-03-03
   - Property block present without `req_calc`: calculated by default.
   - Property block with `req_calc: false`: not calculated.
 
+## Internal Architecture Updates (2026-03-04)
+
+- Refactored `apex/core/property/` into package-based layout (top-level now package folders + `__init__.py`).
+- Adopted software-first property dispatch (`backend -> property`) through `apex.core.property.factory`.
+- Added backend-specific property package hierarchy:
+  - `apex/core/property/vasp/<PropertyName>/`
+  - `apex/core/property/abacus/<PropertyName>/`
+  - `apex/core/property/lammps/<PropertyName>/`
+- Added `apex/core/property/README.md` to document the new structure and conventions (`logic.py`, `impl.py`, `__init__.py`).
+
 ## Compatibility
 
 - Backward compatible: if account or shared Bohrium fields are explicitly set in `global_bohrium.json`, those values are still used.
