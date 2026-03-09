@@ -46,6 +46,46 @@ Release date: 2026-03-03
   - `apex/core/property/lammps/<PropertyName>/`
 - Added `apex/core/property/README.md` to document the new structure and conventions (`logic.py`, `impl.py`, `__init__.py`).
 
+## Submit Validation Update (2026-03-06)
+
+- Added pre-submit validation for `apex submit` to reject `structures` entries containing `.` (for dflow compatibility).
+- The command now fails fast with a clear error message and lists the offending `structures` entries.
+- Kept `interaction.model` compatible with `.` in file names/paths (for example, `Al.eam.alloy` is allowed).
+
+## GUI Updates (2026-03-06)
+
+- Reworked `apex gui` Submit flow to focus on:
+  - profile/template selection
+  - `param.json` generation
+  - `global.json` generation
+  - background submit (`nohup apex submit param.json -c global.json > apex.log 2>&1 &`)
+- Submit templates are now merged from profile-specific parts under `apex/default_config/<profile>/`:
+  - `param_structure.json`
+  - `param_interaction/param_interaction.json`
+  - `param_relax.json`
+  - `param_props.json`
+- Updated interaction editing UX:
+  - LAMMPS interaction type options no longer include `vasp` / `abacus`.
+  - VASP/ABACUS use table-based interaction rows with dynamic add/remove.
+  - ABACUS table includes a third `orb_file` column.
+  - `interaction.incar` and INCAR/INPUT editor are shown in the right-side advanced panel for VASP/ABACUS.
+- Updated Submit action buttons to `Reset` / `Apply` / `Submit`:
+  - `Reset`: regenerate output JSON from current form state.
+  - `Apply`: save user-edited contents.
+  - `Submit`: run background submit.
+- Added submit safety check:
+  - if `apex.log` already exists, GUI asks for confirmation before resubmission.
+- Property checkbox behavior is now strict:
+  - only checked properties are kept in generated `param.json`.
+  - unchecked properties are not emitted.
+- Simplified Manage tab:
+  - now dedicated to tailing and refreshing `apex.log`.
+- Added Account tab in GUI:
+  - supports overwrite updates for `email` / `program_id` / `password`.
+  - password is never displayed in plaintext (status only).
+- Normalized default interaction templates by removing placeholder suffixes such as `(to be change)` from stored values.
+- Added GUI developer documentation: `docs/gui_dev.md`.
+
 ## Compatibility
 
 - Backward compatible: if account or shared Bohrium fields are explicitly set in `global_bohrium.json`, those values are still used.
