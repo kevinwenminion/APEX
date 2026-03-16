@@ -9,7 +9,7 @@ from pymatgen.analysis.defects.core import Interstitial as pmg_Interstitial
 from pymatgen.core import Structure
 from pymatgen.io.vasp import Incar
 
-from apex.core.property.Interstitial import Interstitial
+from apex.core.property.Interstitial.vasp import Interstitial
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 __package__ = "tests"

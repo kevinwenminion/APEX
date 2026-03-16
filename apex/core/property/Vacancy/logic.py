@@ -9,7 +9,7 @@ from pymatgen.analysis.defects.generators import VacancyGenerator
 from pymatgen.core.structure import Structure
 
 from apex.core.calculator.lib import abacus_utils
-from apex.core.property.Property import Property
+from apex.core.property.base import Property
 from apex.core.refine import make_refine
 from apex.core.reproduce import make_repro, post_repro
 from dflow.python import upload_packages
@@ -47,6 +47,15 @@ class Vacancy(Property):
         self.cal_setting = parameter["cal_setting"]
         self.parameter = parameter
         self.inter_param = inter_param if inter_param != None else {"type": "vasp"}
+
+    def _resolve_equilibrium_structure(self, path_to_equi):
+        return os.path.join(path_to_equi, "CONTCAR"), "POSCAR"
+
+    def _load_equilibrium_structure(self, equi_contcar):
+        return Structure.from_file(equi_contcar)
+
+    def _finalize_task_structure(self):
+        pass
 
     def make_confs(self, path_to_work, path_to_equi, refine=False):
         path_to_work = os.path.abspath(path_to_work)
@@ -118,21 +127,10 @@ class Vacancy(Property):
                         "supercell.json",
                     )
             else:
-                if self.inter_param["type"] == "abacus":
-                    CONTCAR = abacus_utils.final_stru(path_to_equi)
-                    POSCAR = "STRU"
-                else:
-                    CONTCAR = "CONTCAR"
-                    POSCAR = "POSCAR"
-
-                equi_contcar = os.path.join(path_to_equi, CONTCAR)
+                equi_contcar, POSCAR = self._resolve_equilibrium_structure(path_to_equi)
                 if not os.path.exists(equi_contcar):
                     raise RuntimeError("please do relaxation first")
-
-                if self.inter_param["type"] == "abacus":
-                    ss = abacus_utils.stru2Structure(equi_contcar)
-                else:
-                    ss = Structure.from_file(equi_contcar)
+                ss = self._load_equilibrium_structure(equi_contcar)
 
                 pre_vds = VacancyGenerator()
                 vds = pre_vds.generate(ss)
@@ -165,9 +163,7 @@ class Vacancy(Property):
                             os.remove(jj)
                     task_list.append(output_task)
                     dss[ii].to("POSCAR", "POSCAR")
-                    if self.inter_param["type"] == "abacus":
-                        abacus_utils.poscar2stru("POSCAR", self.inter_param, "STRU")
-                        #os.remove("POSCAR")
+                    self._finalize_task_structure()
                     # np.savetxt('supercell.out', self.supercell, fmt='%d')
                     dumpfn(self.supercell, "supercell.json")
         os.chdir(cwd)

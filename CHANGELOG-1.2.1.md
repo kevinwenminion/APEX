@@ -36,15 +36,23 @@ Release date: 2026-03-03
   - Property block present without `req_calc`: calculated by default.
   - Property block with `req_calc: false`: not calculated.
 
-## Internal Architecture Updates (2026-03-04)
+## Internal Architecture Updates (2026-03-16)
 
-- Refactored `apex/core/property/` into package-based layout (top-level now package folders + `__init__.py`).
-- Adopted software-first property dispatch (`backend -> property`) through `apex.core.property.factory`.
-- Added backend-specific property package hierarchy:
-  - `apex/core/property/vasp/<PropertyName>/`
-  - `apex/core/property/abacus/<PropertyName>/`
-  - `apex/core/property/lammps/<PropertyName>/`
-- Added `apex/core/property/README.md` to document the new structure and conventions (`logic.py`, `impl.py`, `__init__.py`).
+- Refactored `apex/core/property/` to a property-first source layout.
+- Runtime dispatch remains backend-driven:
+  - `factory.make_property_instance(...)` selects the calculator backend from `interaction.type`.
+  - Backend registries then resolve the property implementation from `parameters["type"]`.
+- Shared property logic now lives in canonical paths such as:
+  - `apex/core/property/<PropertyName>/logic.py`
+- Backend-bound wrappers now live under each property package:
+  - `apex/core/property/<PropertyName>/vasp/`
+  - `apex/core/property/<PropertyName>/abacus/`
+  - `apex/core/property/<PropertyName>/lammps/`
+- Added shared infrastructure for the new layout:
+  - `apex/core/property/base.py`
+  - `apex/core/property/_interaction_helpers.py`
+  - `apex/core/property/_registries.py`
+- Updated `apex/core/property/README.md` to document the canonical layout, import rules, and migration conventions for new properties.
 
 ## Submit Validation Update (2026-03-06)
 

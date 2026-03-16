@@ -3,21 +3,17 @@ import json
 import logging
 import os
 import shutil
-import re
 import subprocess
 from typing import List, Dict, Any
 
-import dpdata
 import seekpath
 from pathlib import Path
 from monty.serialization import dumpfn, loadfn
 from pymatgen.core.structure import Structure
 
 from apex.core.structure import StructureInfo
-from apex.core.calculator.calculator import LAMMPS_INTER_TYPE
-from apex.core.calculator.lib import abacus_utils
 from apex.core.calculator.lib import vasp_utils
-from apex.core.property.Property import Property
+from apex.core.property.base import Property
 from apex.core.refine import make_refine
 from apex.core.reproduce import make_repro, post_repro
 from dflow.python import upload_packages
@@ -79,6 +75,112 @@ class Phonon(Property):
         self.parameter = parameter
         self.inter_param = inter_param if inter_param is not None else {"type": "vasp"}
 
+    def _resolve_equilibrium_structure(self, path_to_equi):
+        return os.path.join(path_to_equi, "CONTCAR"), "POSCAR"
+
+    def _load_equilibrium_structure(self, equi_contcar):
+        ptypes = vasp_utils.get_poscar_types(equi_contcar)
+        ss = Structure.from_file(equi_contcar)
+        return ptypes, ss
+
+    def _prepare_unitcell_poscar(self):
+        if self.primitive:
+            subprocess.call("phonopy --symmetry", shell=True)
+            subprocess.call("cp PPOSCAR POSCAR", shell=True)
+            shutil.copyfile("PPOSCAR", "POSCAR-unitcell")
+        else:
+            shutil.copyfile("POSCAR", "POSCAR-unitcell")
+
+    def _make_backend_tasks(self, path_to_work, ptypes, ret, ret_force_read):
+        task_list = []
+        self._prepare_unitcell_poscar()
+
+        cmd = "phonopy -d --dim='%d %d %d' -c POSCAR" % (
+            int(self.supercell_size[0]),
+            int(self.supercell_size[1]),
+            int(self.supercell_size[2]),
+        )
+        subprocess.call(cmd, shell=True)
+
+        if self.approach == "linear":
+            task_path = os.path.join(path_to_work, "task.000000")
+            os.makedirs(task_path, exist_ok=True)
+            os.chdir(task_path)
+            task_list.append(task_path)
+            os.symlink(os.path.join(path_to_work, "SPOSCAR"), "POSCAR")
+            os.symlink(os.path.join(path_to_work, "POSCAR-unitcell"), "POSCAR-unitcell")
+            with open("band.conf", "w") as fp:
+                fp.write(ret_force_read)
+        elif self.approach == "displacement":
+            poscar_list = glob.glob("POSCAR-0*")
+            for ii in range(len(poscar_list)):
+                task_path = os.path.join(path_to_work, "task.%06d" % ii)
+                os.makedirs(task_path, exist_ok=True)
+                os.chdir(task_path)
+                task_list.append(task_path)
+                os.symlink(os.path.join(path_to_work, poscar_list[ii]), "POSCAR")
+                os.symlink(os.path.join(path_to_work, "POSCAR-unitcell"), "POSCAR-unitcell")
+
+            os.chdir(path_to_work)
+            with open("band.conf", "w") as fp:
+                fp.write(ret)
+            shutil.copyfile("band.conf", "task.000000/band.conf")
+            shutil.copyfile("phonopy_disp.yaml", "task.000000/phonopy_disp.yaml")
+        else:
+            raise RuntimeError(
+                f'Unsupported phonon approach input: {self.approach}. '
+                f'Please choose from "linear" and "displacement".'
+            )
+
+        os.chdir(path_to_work)
+        return task_list
+
+    def _post_process_backend(self, task_list):
+        return None
+
+    def _compute_backend_band(self, work_path, all_tasks):
+        self.check_same_copy("task.000000/band.conf", "band.conf")
+        self.check_same_copy("task.000000/POSCAR-unitcell", "POSCAR-unitcell")
+
+        if self.approach == "linear":
+            os.chdir(all_tasks[0])
+            assert os.path.isfile("vasprun.xml"), "vasprun.xml not found"
+            os.system("phonopy --fc vasprun.xml")
+            assert os.path.isfile("FORCE_CONSTANTS"), "FORCE_CONSTANTS not created"
+            os.system(
+                'phonopy --dim="%s %s %s" -c POSCAR-unitcell band.conf'
+                % (
+                    self.supercell_size[0],
+                    self.supercell_size[1],
+                    self.supercell_size[2],
+                )
+            )
+            os.system("phonopy-bandplot --gnuplot band.yaml > band.dat")
+            print("band.dat is created")
+            shutil.copyfile("band.dat", work_path / "band.dat")
+        elif self.approach == "displacement":
+            os.chdir(work_path)
+            self.check_same_copy("task.000000/phonopy_disp.yaml", "phonopy_disp.yaml")
+            os.system("phonopy -f task.0*/vasprun.xml")
+            if os.path.exists("FORCE_SETS"):
+                print("FORCE_SETS is created")
+            else:
+                logging.warning("FORCE_SETS can not be created")
+            os.system(
+                'phonopy --dim="%s %s %s" -c POSCAR-unitcell band.conf'
+                % (
+                    self.supercell_size[0],
+                    self.supercell_size[1],
+                    self.supercell_size[2],
+                )
+            )
+            os.system("phonopy-bandplot --gnuplot band.yaml > band.dat")
+        else:
+            raise RuntimeError(
+                f'Unsupported phonon approach input: {self.approach}. '
+                f'Please choose from "linear" and "displacement".'
+            )
+
     def make_confs(self, path_to_work, path_to_equi, refine=False):
         path_to_work = os.path.abspath(path_to_work)
         if os.path.exists(path_to_work):
@@ -133,27 +235,11 @@ class Phonon(Property):
                 os.chdir(cwd)
 
             else:
-                if self.inter_param["type"] == "abacus":
-                    CONTCAR = abacus_utils.final_stru(path_to_equi)
-                    POSCAR = "STRU"
-                else:
-                    CONTCAR = "CONTCAR"
-                    POSCAR = "POSCAR"
-
-                equi_contcar = os.path.join(path_to_equi, CONTCAR)
+                equi_contcar, POSCAR = self._resolve_equilibrium_structure(path_to_equi)
                 if not os.path.exists(equi_contcar):
                     raise RuntimeError("please do relaxation first")
 
-                if self.inter_param["type"] == "abacus":
-                    stru = dpdata.System(equi_contcar, fmt="stru")
-                    stru.to("contcar", "CONTCAR.tmp")
-                    ptypes = vasp_utils.get_poscar_types("CONTCAR.tmp")
-                    ss = Structure.from_file("CONTCAR.tmp")
-                    os.remove("CONTCAR.tmp")
-                else:
-                    ptypes = vasp_utils.get_poscar_types(equi_contcar)
-                    ss = Structure.from_file(equi_contcar)
-                    # gen structure
+                ptypes, ss = self._load_equilibrium_structure(equi_contcar)
 
                 # get user input parameter for specific structure
                 st = StructureInfo(ss)
@@ -224,149 +310,16 @@ class Phonon(Property):
                     ret += "BAND_CONNECTION = %s\n" % self.BAND_CONNECTION
 
                 ret_force_read = ret + "FORCE_CONSTANTS=READ\n"
-
-                task_list = []
-                # ------------make for abacus---------------
-                if self.inter_param["type"] == "abacus":
-                    # make setting.conf
-                    ret_sc = ""
-                    ret_sc += "DIM=%s %s %s\n" % (
-                        self.supercell_size[0],
-                        self.supercell_size[1],
-                        self.supercell_size[2]
-                    )
-                    ret_sc += "ATOM_NAME ="
-                    for atom in ptypes:
-                        ret_sc += " %s" % (atom)
-                    ret_sc += "\n"
-                    with open("setting.conf", "a") as fp:
-                        fp.write(ret_sc)
-                    # append NUMERICAL_ORBITAL to STRU after relaxation
-                    orb_file = self.inter_param.get("orb_files", None)
-                    abacus_utils.append_orb_file_to_stru("STRU", orb_file, prefix='pp_orb')
-                    ## generate STRU-00x
-                    cmd = "phonopy setting.conf --abacus -d"
-                    subprocess.call(cmd, shell=True)
-
-                    with open("band.conf", "a") as fp:
-                        fp.write(ret)
-                    # generate task.000*
-                    stru_list = glob.glob("STRU-0*")
-                    for ii in range(len(stru_list)):
-                        task_path = os.path.join(path_to_work, 'task.%06d' % ii)
-                        os.makedirs(task_path, exist_ok=True)
-                        os.chdir(task_path)
-                        task_list.append(task_path)
-                        os.symlink(os.path.join(path_to_work, stru_list[ii]), 'STRU')
-                        os.symlink(os.path.join(path_to_work, 'STRU'), 'STRU.ori')
-                        os.symlink(os.path.join(path_to_work, 'band.conf'), 'band.conf')
-                        os.symlink(os.path.join(path_to_work, 'phonopy_disp.yaml'), 'phonopy_disp.yaml')
-                        try:
-                            os.symlink(os.path.join(path_to_work, 'KPT'), 'KPT')
-                        except:
-                            pass
-                    os.chdir(cwd)
-                    return task_list
-
-                # ------------make for vasp and lammps------------
-                if self.primitive:
-                    subprocess.call('phonopy --symmetry', shell=True)
-                    subprocess.call('cp PPOSCAR POSCAR', shell=True)
-                    shutil.copyfile("PPOSCAR", "POSCAR-unitcell")
-                else:
-                    shutil.copyfile("POSCAR", "POSCAR-unitcell")
-
-                # make tasks
-                if self.inter_param["type"] == 'vasp':
-                    cmd = "phonopy -d --dim='%d %d %d' -c POSCAR" % (
-                        int(self.supercell_size[0]),
-                        int(self.supercell_size[1]),
-                        int(self.supercell_size[2])
-                    )
-                    subprocess.call(cmd, shell=True)
-                    # linear response method
-                    if self.approach == 'linear':
-                        task_path = os.path.join(path_to_work, 'task.000000')
-                        os.makedirs(task_path, exist_ok=True)
-                        os.chdir(task_path)
-                        task_list.append(task_path)
-                        os.symlink(os.path.join(path_to_work, "SPOSCAR"), "POSCAR")
-                        os.symlink(os.path.join(path_to_work, "POSCAR-unitcell"), "POSCAR-unitcell")
-                        with open("band.conf", "a") as fp:
-                            fp.write(ret_force_read)
-                    # finite displacement method
-                    elif self.approach == 'displacement':
-                        poscar_list = glob.glob("POSCAR-0*")
-                        for ii in range(len(poscar_list)):
-                            task_path = os.path.join(path_to_work, 'task.%06d' % ii)
-                            os.makedirs(task_path, exist_ok=True)
-                            os.chdir(task_path)
-                            task_list.append(task_path)
-                            os.symlink(os.path.join(path_to_work, poscar_list[ii]), 'POSCAR')
-                            os.symlink(os.path.join(path_to_work, "POSCAR-unitcell"), "POSCAR-unitcell")
-
-                        os.chdir(path_to_work)
-                        with open("band.conf", "a") as fp:
-                            fp.write(ret)
-                        shutil.copyfile("band.conf", "task.000000/band.conf")
-                        shutil.copyfile("phonopy_disp.yaml", "task.000000/phonopy_disp.yaml")
-
-                    else:
-                        raise RuntimeError(
-                            f'Unsupported phonon approach input: {self.approach}. '
-                            f'Please choose from "linear" and "displacement".'
-                        )
-                    os.chdir(cwd)
-                    return task_list
-                # ----------make for lammps-------------
-                elif self.inter_param["type"] in LAMMPS_INTER_TYPE:
-                    task_path = os.path.join(path_to_work, 'task.000000')
-                    os.makedirs(task_path, exist_ok=True)
-                    os.chdir(task_path)
-                    task_list.append(task_path)
-                    if os.path.isfile(POSCAR) or os.path.islink(POSCAR):
-                        os.remove(POSCAR)
-                    os.symlink(os.path.join(path_to_work, "POSCAR-unitcell"), POSCAR)
-
-                    with open("band.conf", "a") as fp:
-                        fp.write(ret_force_read)
-                    os.chdir(cwd)
-                    return task_list
-                else:
-                    raise RuntimeError(
-                        f'Unsupported interaction type input: {self.inter_param["type"]}'
-                    )
+                task_list = self._make_backend_tasks(path_to_work, ptypes, ret, ret_force_read)
+                os.chdir(cwd)
+                return task_list
 
     def post_process(self, task_list):
         cwd = os.getcwd()
-        inter_type = self.inter_param["type"]
-        if inter_type in LAMMPS_INTER_TYPE:
-            # prepare in.lammps
-            for ii in task_list:
-                os.chdir(ii)
-                with open("in.lammps", 'r') as f1:
-                    contents = f1.readlines()
-                    for jj in range(len(contents)):
-                        is_pair_coeff = re.search("pair_coeff", contents[jj])
-                        if is_pair_coeff:
-                            pair_line_id = jj
-                            break
-                    del contents[pair_line_id + 1:]
-
-                with open("in.lammps", 'w') as f2:
-                    for jj in range(len(contents)):
-                        f2.write(contents[jj])
-                # dump phonolammps command
-                phonolammps_cmd = "phonolammps in.lammps -c POSCAR --dim %s %s %s " %(
-                    self.supercell_size[0], self.supercell_size[1], self.supercell_size[2]
-                )
-                with open("run_command", 'w') as f3:
-                    f3.write(phonolammps_cmd)
-        elif inter_type == "vasp":
-            pass
-        elif inter_type == "abacus":
-            pass
-        os.chdir(cwd)
+        try:
+            self._post_process_backend(task_list)
+        finally:
+            os.chdir(cwd)
 
     def task_type(self):
         return self.parameter["type"]
@@ -502,57 +455,7 @@ class Phonon(Property):
 
         if not self.reprod:
             os.chdir(work_path)
-            if self.inter_param["type"] == 'abacus':
-                self.check_same_copy("task.000000/band.conf", "band.conf")
-                self.check_same_copy("task.000000/STRU.ori", "STRU")
-                self.check_same_copy("task.000000/phonopy_disp.yaml", "phonopy_disp.yaml")
-                os.system('phonopy -f task.0*/OUT.ABACUS/running_scf.log')
-                if os.path.exists("FORCE_SETS"):
-                    print('FORCE_SETS is created')
-                else:
-                    logging.warning('FORCE_SETS can not be created')
-                os.system('phonopy band.conf --abacus')
-                os.system('phonopy-bandplot --gnuplot band.yaml > band.dat')
-
-            elif self.inter_param["type"] == 'vasp':
-                self.check_same_copy("task.000000/band.conf", "band.conf")
-                self.check_same_copy("task.000000/POSCAR-unitcell", "POSCAR-unitcell")
-
-                if self.approach == "linear":
-                    os.chdir(all_tasks[0])
-                    assert os.path.isfile('vasprun.xml'), "vasprun.xml not found"
-                    os.system('phonopy --fc vasprun.xml')
-                    assert os.path.isfile('FORCE_CONSTANTS'), "FORCE_CONSTANTS not created"
-                    os.system('phonopy --dim="%s %s %s" -c POSCAR-unitcell band.conf' % (
-                            self.supercell_size[0],
-                            self.supercell_size[1],
-                            self.supercell_size[2]))
-                    os.system('phonopy-bandplot --gnuplot band.yaml > band.dat')
-                    print('band.dat is created')
-                    shutil.copyfile("band.dat", work_path/"band.dat")
-
-                elif self.approach == "displacement":
-                    self.check_same_copy("task.000000/band.conf", "band.conf")
-                    self.check_same_copy("task.000000/phonopy_disp.yaml", "phonopy_disp.yaml")
-                    os.system('phonopy -f task.0*/vasprun.xml')
-                    if os.path.exists("FORCE_SETS"):
-                        print('FORCE_SETS is created')
-                    else:
-                        logging.warning('FORCE_SETS can not be created')
-                    os.system('phonopy --dim="%s %s %s" -c POSCAR-unitcell band.conf' % (
-                        self.supercell_size[0],
-                        self.supercell_size[1],
-                        self.supercell_size[2]))
-                    os.system('phonopy-bandplot --gnuplot band.yaml > band.dat')
-
-            elif self.inter_param["type"] in LAMMPS_INTER_TYPE:
-                os.chdir(all_tasks[0])
-                assert os.path.isfile('FORCE_CONSTANTS'), "FORCE_CONSTANTS not created"
-                os.system('phonopy --dim="%s %s %s" -c POSCAR band.conf' % (
-                    self.supercell_size[0], self.supercell_size[1], self.supercell_size[2])
-                    )
-                os.system('phonopy-bandplot --gnuplot band.yaml > band.dat')
-                shutil.copyfile("band.dat", work_path/"band.dat")
+            self._compute_backend_band(work_path, all_tasks)
 
         else:
             if "init_data_path" not in self.parameter:

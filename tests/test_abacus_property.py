@@ -11,12 +11,12 @@ from apex.core.calculator.ABACUS import ABACUS
 from apex.core.calculator.lib import abacus_scf
 
 from apex.core.common_prop import make_property
-from apex.core.property.Elastic import Elastic
-from apex.core.property.EOS import EOS
-from apex.core.property.Gamma import Gamma
-from apex.core.property.Interstitial import Interstitial
-from apex.core.property.Surface import Surface
-from apex.core.property.Vacancy import Vacancy
+from apex.core.property.Elastic.abacus import Elastic
+from apex.core.property.EOS.abacus import EOS
+from apex.core.property.Gamma.abacus import Gamma
+from apex.core.property.Interstitial.abacus import Interstitial
+from apex.core.property.Surface.abacus import Surface
+from apex.core.property.Vacancy.abacus import Vacancy
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 __package__ = "tests"

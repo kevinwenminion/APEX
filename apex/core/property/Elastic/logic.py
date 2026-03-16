@@ -16,7 +16,7 @@ from pymatgen.io.vasp import Incar, Kpoints
 from apex.core.calculator.lib import abacus_utils
 from apex.core.calculator.lib import vasp_utils
 from apex.core.calculator.lib import abacus_scf
-from apex.core.property.Property import Property
+from apex.core.property.base import Property
 from apex.core.structure import StructureInfo
 from apex.core.refine import make_refine
 from apex.core.calculator.lib.vasp_utils import incar_upper
@@ -54,6 +54,39 @@ class Elastic(Property):
         self.parameter = parameter
         self.inter_param = inter_param or {"type": "vasp"}
 
+    def _resolve_equilibrium_structure(self, path_to_equi):
+        return os.path.join(path_to_equi, "CONTCAR"), "POSCAR"
+
+    def _load_equilibrium_structure(self, equi_contcar):
+        return Structure.from_file(equi_contcar)
+
+    def _finalize_task_structure(self):
+        pass
+
+    def _post_process_inputs(self, task_list):
+        POSCAR = "POSCAR"
+        INCAR = "INCAR"
+        KPOINTS = "KPOINTS"
+        cwd = os.getcwd()
+        poscar_start = os.path.abspath(os.path.join(task_list[0], "..", POSCAR))
+        os.chdir(os.path.join(task_list[0], ".."))
+        if os.path.isfile(os.path.join(task_list[0], INCAR)):
+            incar = incar_upper(Incar.from_file(os.path.join(task_list[0], "INCAR")))
+            kspacing = incar.get("KSPACING")
+            kgamma = incar.get("KGAMMA", False)
+            ret = vasp_utils.make_kspacing_kpoints(poscar_start, kspacing, kgamma)
+            kp = Kpoints.from_str(ret)
+            if os.path.isfile("KPOINTS"):
+                os.remove("KPOINTS")
+            kp.write_file("KPOINTS")
+            kpoints_universal = os.path.abspath(os.path.join(task_list[0], "..", KPOINTS))
+            for ii in task_list:
+                if os.path.exists(os.path.join(ii, KPOINTS)):
+                    os.remove(os.path.join(ii, KPOINTS))
+                os.chdir(ii)
+                os.symlink(os.path.relpath(kpoints_universal), KPOINTS)
+        os.chdir(cwd)
+
     def make_confs(self, path_to_work, path_to_equi, refine=False):
         path_to_work = os.path.abspath(path_to_work)
         if os.path.exists(path_to_work):
@@ -83,9 +116,7 @@ class Elastic(Property):
         task_list = []
         cwd = os.getcwd()
 
-        CONTCAR = "CONTCAR" if self.inter_param["type"] != "abacus" else abacus_utils.final_stru(path_to_equi)
-        POSCAR = "POSCAR" if self.inter_param["type"] != "abacus" else "STRU"
-        equi_contcar = os.path.join(path_to_equi, CONTCAR)
+        equi_contcar, POSCAR = self._resolve_equilibrium_structure(path_to_equi)
 
         os.chdir(path_to_work)
         if os.path.exists(POSCAR) or os.path.islink(POSCAR):
@@ -136,10 +167,7 @@ class Elastic(Property):
             if not os.path.exists(equi_contcar):
                 raise RuntimeError("please do relaxation first")
 
-            if self.inter_param["type"] == "abacus":
-                ss = abacus_utils.stru2Structure(equi_contcar)
-            else:
-                ss = Structure.from_file(equi_contcar)
+            ss = self._load_equilibrium_structure(equi_contcar)
             # find conventional cell
             if self.conventional:
                 st = StructureInfo(ss)
@@ -179,9 +207,7 @@ class Elastic(Property):
                         os.remove(jj)
                 task_list.append(output_task)
                 dfm_ss.deformed_structures[ii].to("POSCAR", "POSCAR")
-                if self.inter_param["type"] == "abacus":
-                    abacus_utils.poscar2stru("POSCAR", self.inter_param, "STRU")
-                    #os.remove("POSCAR")
+                self._finalize_task_structure()
                 # record strain
                 df = Strain.from_deformation(dfm_ss.deformations[ii])
                 dumpfn(df.as_dict(), "strain.json", indent=4)
@@ -189,54 +215,7 @@ class Elastic(Property):
         return task_list
 
     def post_process(self, task_list):
-        if self.inter_param["type"] == "abacus":
-            POSCAR = "STRU"
-            INCAR = "INPUT"
-            KPOINTS = "KPT"
-        else:
-            POSCAR = "POSCAR"
-            INCAR = "INCAR"
-            KPOINTS = "KPOINTS"
-
-        cwd = os.getcwd()
-        poscar_start = os.path.abspath(os.path.join(task_list[0], "..", POSCAR))
-        os.chdir(os.path.join(task_list[0], ".."))
-        if os.path.isfile(os.path.join(task_list[0], INCAR)):
-            if self.inter_param["type"] == "abacus":
-                input_aba = abacus_scf.get_abacus_input_parameters("INPUT")
-                if "kspacing" in input_aba:
-                    kspacing = float(input_aba["kspacing"])
-                    kpt = abacus_utils.make_kspacing_kpt(poscar_start, kspacing)
-                    kpt += [0, 0, 0]
-                    abacus_utils.write_kpt("KPT", kpt)
-                    del input_aba["kspacing"]
-                    os.remove("INPUT")
-                    abacus_utils.write_input("INPUT", input_aba)
-                else:
-                    os.rename(os.path.join(task_list[0], "KPT"), "./KPT")
-            else:
-                incar = incar_upper(
-                    Incar.from_file(os.path.join(task_list[0], "INCAR"))
-                )
-                kspacing = incar.get("KSPACING")
-                kgamma = incar.get("KGAMMA", False)
-                ret = vasp_utils.make_kspacing_kpoints(poscar_start, kspacing, kgamma)
-                kp = Kpoints.from_str(ret)
-                if os.path.isfile("KPOINTS"):
-                    os.remove("KPOINTS")
-                kp.write_file("KPOINTS")
-
-            os.chdir(cwd)
-            kpoints_universal = os.path.abspath(
-                os.path.join(task_list[0], "..", KPOINTS)
-            )
-            for ii in task_list:
-                if os.path.exists(os.path.join(ii, KPOINTS)):
-                    os.remove(os.path.join(ii, KPOINTS))
-                os.chdir(ii)
-                os.symlink(os.path.relpath(kpoints_universal), KPOINTS)
-
-        os.chdir(cwd)
+        self._post_process_inputs(task_list)
 
     def task_type(self):
         return self.parameter["type"]

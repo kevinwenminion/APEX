@@ -13,7 +13,7 @@ from monty.serialization import dumpfn, loadfn
 from apex.core.calculator.lib import abacus_scf
 from apex.core.calculator.lib import abacus_utils
 from apex.core.calculator.lib import vasp_utils
-from apex.core.property.Property import Property
+from apex.core.property.base import Property
 from apex.core.reproduce import make_repro, post_repro
 from dflow.python import upload_packages
 
@@ -64,6 +64,23 @@ class Cohesive(Property):
 
         self.parameter = parameter
         self.inter_param = inter_param if inter_param is not None else {"type": "vasp"}
+
+    def _resolve_equilibrium_structure(self, path_to_equi: str) -> str:
+        return os.path.join(path_to_equi, "CONTCAR")
+
+    def _read_equilibrium_lattice(self, equi_structure: str) -> float:
+        with open(equi_structure, "r") as f:
+            lines = f.readlines()
+        scale = float(lines[1].strip())
+        cell = np.array([[float(x) for x in line.split()] for line in lines[2:5]])
+        cell *= scale
+        return np.linalg.norm(cell, axis=1)[0]
+
+    def _task_structure_names(self) -> Tuple[str, str]:
+        return "POSCAR", "POSCAR.orig"
+
+    def _scale_structure(self, src: str, dst: str, scale_val: float) -> None:
+        vasp_utils.poscar_scale(src, dst, scale_val)
 
     def make_confs(self, path_to_work: str, path_to_equi: str, refine: bool = False) -> List[str]:
         """Create task directories with scaled structures.
@@ -122,24 +139,12 @@ class Cohesive(Property):
             print("treat latt_start and latt_end as relative lattice constant")
 
         # Determine equilibrium structure file and a0 (|a| of the first lattice vector).
-        if self.inter_param["type"] == "abacus":
-            equi_stru = os.path.join(path_to_equi, abacus_utils.final_stru(path_to_equi))
-        else:
-            equi_stru = os.path.join(path_to_equi, "CONTCAR")
+        equi_stru = self._resolve_equilibrium_structure(path_to_equi)
 
         if not os.path.isfile(equi_stru):
             raise RuntimeError(f"Can not find {equi_stru}, please do relaxation first")
 
-        if self.inter_param["type"] == "abacus":
-            stru_data = abacus_scf.get_abacus_STRU(equi_stru)
-            a0 = np.linalg.norm(stru_data["cells"], axis=1)[0]
-        else:
-            with open(equi_stru, "r") as f:
-                lines = f.readlines()
-            scale = float(lines[1].strip())
-            cell = np.array([[float(x) for x in line.split()] for line in lines[2:5]])
-            cell *= scale
-            a0 = np.linalg.norm(cell, axis=1)[0]
+        a0 = self._read_equilibrium_lattice(equi_stru)
 
         self.parameter["scale2equi"] = []
 
@@ -151,14 +156,7 @@ class Cohesive(Property):
             task_list.append(output_task)
 
             # Decide file names and scaling function based on calculator type.
-            if self.inter_param["type"] == "abacus":
-                poscar_name = "STRU"
-                poscar_orig = "STRU.orig"
-                scale_func = abacus_utils.stru_scale
-            else:
-                poscar_name = "POSCAR"
-                poscar_orig = "POSCAR.orig"
-                scale_func = vasp_utils.poscar_scale
+            poscar_name, poscar_orig = self._task_structure_names()
 
             with _chdir(output_task):
                 # Clean any leftovers from previous runs.
@@ -182,7 +180,7 @@ class Cohesive(Property):
                 self.parameter["scale2equi"].append(scale_val)
 
                 # Create scaled structure.
-                scale_func(poscar_orig, poscar_name, scale_val)
+                self._scale_structure(poscar_orig, poscar_name, scale_val)
 
             task_num += 1
 

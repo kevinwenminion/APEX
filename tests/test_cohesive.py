@@ -6,7 +6,7 @@ import unittest
 
 import json
 import numpy as np
-from apex.core.property.Cohesive import Cohesive
+from apex.core.property.Cohesive.vasp import Cohesive
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 __package__ = "tests"

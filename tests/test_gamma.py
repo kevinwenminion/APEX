@@ -7,7 +7,7 @@ import unittest
 from pymatgen.core.structure import Structure
 from pymatgen.io.vasp import Incar
 
-from apex.core.property.Gamma import Gamma
+from apex.core.property.Gamma.vasp import Gamma
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 __package__ = "tests"

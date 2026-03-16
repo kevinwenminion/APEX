@@ -11,7 +11,7 @@ from pymatgen.core.surface import generate_all_slabs
 
 from apex.core.calculator.lib import abacus_utils
 from apex.core.calculator.lib import vasp_utils
-from apex.core.property.Property import Property
+from apex.core.property.base import Property
 from apex.core.refine import make_refine
 from apex.core.reproduce import make_repro, post_repro
 from dflow.python import upload_packages
@@ -56,6 +56,20 @@ class Surface(Property):
         self.cal_setting = parameter["cal_setting"]
         self.parameter = parameter
         self.inter_param = inter_param if inter_param != None else {"type": "vasp"}
+
+    def _resolve_equilibrium_structure(self, path_to_equi):
+        return os.path.join(path_to_equi, "CONTCAR")
+
+    def _read_equilibrium_structure(self, equi_contcar):
+        ptypes = vasp_utils.get_poscar_types(equi_contcar)
+        ss = Structure.from_file(equi_contcar)
+        return ptypes, ss
+
+    def _task_structure_name(self):
+        return "POSCAR"
+
+    def _finalize_task_structure(self):
+        pass
 
     def make_confs(self, path_to_work, path_to_equi, refine=False):
         path_to_work = os.path.abspath(path_to_work)
@@ -128,27 +142,11 @@ class Surface(Property):
                     )
 
             else:
-                if self.inter_param["type"] == "abacus":
-                    CONTCAR = abacus_utils.final_stru(path_to_equi)
-                    POSCAR = "STRU"
-                else:
-                    CONTCAR = "CONTCAR"
-                    POSCAR = "POSCAR"
-
-                equi_contcar = os.path.join(path_to_equi, CONTCAR)
+                POSCAR = self._task_structure_name()
+                equi_contcar = self._resolve_equilibrium_structure(path_to_equi)
                 if not os.path.exists(equi_contcar):
                     raise RuntimeError("please do relaxation first")
-
-                if self.inter_param["type"] == "abacus":
-                    stru = dpdata.System(equi_contcar, fmt="stru")
-                    stru.to("contcar", "CONTCAR.tmp")
-                    ptypes = vasp_utils.get_poscar_types("CONTCAR.tmp")
-                    ss = Structure.from_file("CONTCAR.tmp")
-                    os.remove("CONTCAR.tmp")
-                else:
-                    ptypes = vasp_utils.get_poscar_types(equi_contcar)
-                    # gen structure
-                    ss = Structure.from_file(equi_contcar)
+                ptypes, ss = self._read_equilibrium_structure(equi_contcar)
 
                 # gen slabs
                 all_slabs = generate_all_slabs(
@@ -182,9 +180,7 @@ class Surface(Property):
                     vasp_utils.regulate_poscar("POSCAR.tmp", "POSCAR")
                     vasp_utils.sort_poscar("POSCAR", "POSCAR", ptypes)
                     vasp_utils.perturb_xz("POSCAR", "POSCAR", self.pert_xz)
-                    if self.inter_param["type"] == "abacus":
-                        abacus_utils.poscar2stru("POSCAR", self.inter_param, "STRU")
-                        #os.remove("POSCAR")
+                    self._finalize_task_structure()
                     # record miller
                     dumpfn(all_slabs[ii].miller_index, "miller.json")
         

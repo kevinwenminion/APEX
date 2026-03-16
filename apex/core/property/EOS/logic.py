@@ -9,7 +9,7 @@ from monty.serialization import dumpfn, loadfn
 from apex.core.calculator.lib import abacus_utils
 from apex.core.calculator.lib import vasp_utils
 from apex.core.calculator.lib import abacus_scf
-from apex.core.property.Property import Property
+from apex.core.property.base import Property
 from apex.core.refine import make_refine
 from apex.core.reproduce import make_repro, post_repro
 from dflow.python import upload_packages
@@ -54,6 +54,20 @@ class EOS(Property):
             self.init_from_suffix = parameter["init_from_suffix"]
         self.parameter = parameter
         self.inter_param = inter_param if inter_param != None else {"type": "vasp"}
+
+    def _resolve_equilibrium_structure(self, path_to_equi):
+        return os.path.join(path_to_equi, "CONTCAR")
+
+    def _read_volume_per_atom(self, equi_structure):
+        return vasp_utils.poscar_vol(equi_structure) / vasp_utils.poscar_natoms(
+            equi_structure
+        )
+
+    def _task_structure_names(self):
+        return "POSCAR", "POSCAR.orig"
+
+    def _scale_structure(self, src, dst, scale):
+        vasp_utils.poscar_scale(src, dst, scale)
 
     def make_confs(self, path_to_work, path_to_equi, refine=False):
         path_to_work = os.path.abspath(path_to_work)
@@ -140,28 +154,14 @@ class EOS(Property):
                 else:
                     print("treat vol_start and vol_end as relative volume")
 
-                if self.inter_param["type"] == "abacus":
-                    equi_contcar = os.path.join(
-                        path_to_equi, abacus_utils.final_stru(path_to_equi)
-                    )
-                else:
-                    equi_contcar = os.path.join(path_to_equi, "CONTCAR")
+                equi_contcar = self._resolve_equilibrium_structure(path_to_equi)
 
                 if not os.path.isfile(equi_contcar):
                     raise RuntimeError(
                         "Can not find %s, please do relaxation first" % equi_contcar
                     )
 
-                if self.inter_param["type"] == "abacus":
-                    stru_data = abacus_scf.get_abacus_STRU(equi_contcar)
-                    vol_to_poscar = (
-                        abs(np.linalg.det(stru_data["cells"]))
-                        / np.array(stru_data["atom_numbs"]).sum()
-                    )
-                else:
-                    vol_to_poscar = vasp_utils.poscar_vol(equi_contcar) / vasp_utils.poscar_natoms(
-                        equi_contcar
-                    )
+                vol_to_poscar = self._read_volume_per_atom(equi_contcar)
                 self.parameter["scale2equi"] = []
 
                 task_num = 0
@@ -170,14 +170,7 @@ class EOS(Property):
                     output_task = os.path.join(path_to_work, "task.%06d" % task_num)
                     os.makedirs(output_task, exist_ok=True)
                     os.chdir(output_task)
-                    if self.inter_param["type"] == "abacus":
-                        POSCAR = "STRU"
-                        POSCAR_orig = "STRU.orig"
-                        scale_func = abacus_utils.stru_scale
-                    else:
-                        POSCAR = "POSCAR"
-                        POSCAR_orig = "POSCAR.orig"
-                        scale_func = vasp_utils.poscar_scale
+                    POSCAR, POSCAR_orig = self._task_structure_names()
 
                     for ii in [
                         "INCAR",
@@ -201,7 +194,7 @@ class EOS(Property):
                         eos_params = {"volume": vol * vol_to_poscar, "scale": scale}
                     dumpfn(eos_params, "eos.json", indent=4)
                     self.parameter["scale2equi"].append(scale)  # 06/22
-                    scale_func(POSCAR_orig, POSCAR, scale)
+                    self._scale_structure(POSCAR_orig, POSCAR, scale)
                     task_num += 1
         os.chdir(cwd)
         return task_list

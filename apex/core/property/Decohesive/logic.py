@@ -13,7 +13,7 @@ from pymatgen.core.surface import SlabGenerator
 
 from apex.core.calculator.lib import abacus_utils
 from apex.core.calculator.lib import vasp_utils
-from apex.core.property.Property import Property
+from apex.core.property.base import Property
 from apex.core.reproduce import make_repro, post_repro
 from dflow.python import upload_packages
 
@@ -115,28 +115,25 @@ class Decohesive(Property):
 
     def _load_equilibrium(self, path_to_equi: str):
         """Load equilibrium structure and POSCAR types."""
-        if self.inter_param["type"] == "abacus":
-            contcar_name = abacus_utils.final_stru(path_to_equi)
-            poscar_name = "STRU"
-        else:
-            contcar_name = "CONTCAR"
-            poscar_name = "POSCAR"
-
-        equi_contcar = os.path.join(path_to_equi, contcar_name)
+        equi_contcar = self._resolve_equilibrium_structure(path_to_equi)
         if not os.path.exists(equi_contcar):
             raise RuntimeError("please do relaxation first")
+        ptypes, ss = self._read_equilibrium_structure(equi_contcar)
+        return ptypes, ss, equi_contcar, self._task_structure_name()
 
-        if self.inter_param["type"] == "abacus":
-            stru = dpdata.System(equi_contcar, fmt="stru")
-            stru.to("contcar", "CONTCAR.tmp")
-            ptypes = vasp_utils.get_poscar_types("CONTCAR.tmp")
-            ss = Structure.from_file("CONTCAR.tmp")
-            os.remove("CONTCAR.tmp")
-        else:
-            ptypes = vasp_utils.get_poscar_types(equi_contcar)
-            ss = Structure.from_file(equi_contcar)
+    def _resolve_equilibrium_structure(self, path_to_equi: str) -> str:
+        return os.path.join(path_to_equi, "CONTCAR")
 
-        return ptypes, ss, equi_contcar, poscar_name
+    def _read_equilibrium_structure(self, equi_contcar: str):
+        ptypes = vasp_utils.get_poscar_types(equi_contcar)
+        ss = Structure.from_file(equi_contcar)
+        return ptypes, ss
+
+    def _task_structure_name(self) -> str:
+        return "POSCAR"
+
+    def _finalize_task_structure(self) -> None:
+        pass
 
     def _build_slab_series(self, ss: Structure):
         """Generate slabs with incremental vacuum sizes."""
@@ -166,9 +163,7 @@ class Decohesive(Property):
             vasp_utils.sort_poscar("POSCAR", "POSCAR", ptypes)
             vasp_utils.perturb_xz("POSCAR", "POSCAR", self.pert_xz)
 
-            if self.inter_param["type"] == "abacus":
-                abacus_utils.poscar2stru("POSCAR", self.inter_param, "STRU")
-                os.remove("POSCAR")
+            self._finalize_task_structure()
 
             decohesive = {"miller_index": self.miller_index, "vacuum_size": vacuum_size}
             dumpfn(decohesive, "decohesive.json", indent=4)

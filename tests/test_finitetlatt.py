@@ -9,7 +9,7 @@ from monty.serialization import loadfn
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 __package__ = "tests"
 
-from apex.core.property.FiniteTlatt import FiniteTlatt
+from apex.core.property.FiniteTlatt.lammps import FiniteTlatt
 from apex.core.calculator.Lammps import Lammps
 
 

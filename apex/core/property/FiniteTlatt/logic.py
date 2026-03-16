@@ -10,7 +10,7 @@ from monty.serialization import dumpfn
 from pymatgen.core.structure import Structure
 
 from apex.core.calculator.lib import vasp_utils
-from apex.core.property.Property import Property
+from apex.core.property.base import Property
 from apex.core.refine import make_refine
 from apex.core.reproduce import make_repro, post_repro
 from dflow.python import upload_packages
@@ -40,10 +40,6 @@ class FiniteTlatt(Property):
         parameter["reproduce"] = parameter.get("reproduce", False)
         self.reprod = parameter["reproduce"]
 
-        # Enforce LAMMPS-only workflow
-        if inter_param is not None and inter_param.get("type") in ["vasp", "abacus"]:
-            raise TypeError("FiniteTlatt supports only LAMMPS calculations.")
-
         parameter.setdefault("cal_setting", {})
         for key, val in DEFAULT_CAL_SETTING.items():
             parameter["cal_setting"].setdefault(key, val)
@@ -63,6 +59,9 @@ class FiniteTlatt(Property):
         self.parameter = parameter
         # only supports LAMMPS now
         self.inter_param = inter_param or {"type": "lammps"}
+
+    def _ensure_supported_backend(self):
+        pass
 
     def make_confs(self, path_to_work: str, path_to_equi: str, refine: bool = False):
         path_to_work = os.path.abspath(path_to_work)
@@ -150,8 +149,7 @@ class FiniteTlatt(Property):
         return task_list
 
     def _make_fresh_tasks(self, path_to_work: str, path_to_equi: str) -> List[str]:
-        if self.inter_param["type"] in ["vasp", "abacus"]:
-            raise TypeError("FiniteTlatt only supports LAMMPS calculation")
+        self._ensure_supported_backend()
 
         equi_contcar = os.path.join(path_to_equi, "CONTCAR")
         if not os.path.exists(equi_contcar):

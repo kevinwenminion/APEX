@@ -13,7 +13,7 @@ from pymatgen.analysis.diffraction.tem import TEMCalculator
 
 from apex.core.calculator.lib import abacus_utils
 from apex.core.calculator.lib import vasp_utils
-from apex.core.property.Property import Property
+from apex.core.property.base import Property
 from apex.core.refine import make_refine
 from apex.core.reproduce import make_repro, post_repro
 from apex.core.structure import StructureInfo
@@ -78,6 +78,20 @@ class Gamma(Property):
         self.cal_setting = parameter["cal_setting"]
         self.parameter = parameter
         self.inter_param = inter_param if inter_param != None else {"type": "vasp"}
+
+    def _resolve_equilibrium_structure(self, path_to_equi):
+        return os.path.join(path_to_equi, "CONTCAR"), "POSCAR"
+
+    def _load_equilibrium_structure(self, equi_contcar):
+        ptypes = vasp_utils.get_poscar_types(equi_contcar)
+        ss = Structure.from_file(equi_contcar)
+        return ptypes, ss
+
+    def _finalize_task_structure(self):
+        pass
+
+    def _fix_task_output(self, task_dir, first_task):
+        self.__poscar_fix(os.path.join(task_dir, "POSCAR"))
 
     def make_confs(self, path_to_work, path_to_equi, refine=False):
         path_to_work = os.path.abspath(path_to_work)
@@ -148,14 +162,7 @@ class Gamma(Property):
                     )
 
             else:
-                if self.inter_param["type"] == "abacus":
-                    CONTCAR = abacus_utils.final_stru(path_to_equi)
-                    POSCAR = "STRU"
-                else:
-                    CONTCAR = "CONTCAR"
-                    POSCAR = "POSCAR"
-
-                equi_contcar = os.path.join(path_to_equi, CONTCAR)
+                equi_contcar, POSCAR = self._resolve_equilibrium_structure(path_to_equi)
                 if not os.path.exists(equi_contcar):
                     raise RuntimeError("please do relaxation first")
                 # print("we now only support gamma line calculation for BCC FCC and HCP metals")
@@ -163,16 +170,7 @@ class Gamma(Property):
                 #    f"supported slip systems are:\n{SlabSlipSystem.hint_string()}"
                 # )
 
-                if self.inter_param["type"] == "abacus":
-                    stru = dpdata.System(equi_contcar, fmt="stru")
-                    stru.to("contcar", "CONTCAR.tmp")
-                    ptypes = vasp_utils.get_poscar_types("CONTCAR.tmp")
-                    ss = Structure.from_file("CONTCAR.tmp")
-                    os.remove("CONTCAR.tmp")
-                else:
-                    ptypes = vasp_utils.get_poscar_types(equi_contcar)
-                    # read structure from relaxed CONTCAR
-                    ss = Structure.from_file(equi_contcar)
+                ptypes, ss = self._load_equilibrium_structure(equi_contcar)
 
                 # rewrite new CONTCAR with direct coords
                 os.chdir(path_to_equi)
@@ -254,9 +252,7 @@ class Gamma(Property):
                     obtained_slab.to("POSCAR.tmp", "POSCAR")
                     vasp_utils.regulate_poscar("POSCAR.tmp", "POSCAR")
                     vasp_utils.sort_poscar("POSCAR", "POSCAR", ptypes)
-                    if self.inter_param["type"] == "abacus":
-                        abacus_utils.poscar2stru("POSCAR", self.inter_param, "STRU")
-                        #os.remove("POSCAR")
+                    self._finalize_task_structure()
                     # vasp.perturb_xz('POSCAR', 'POSCAR', self.pert_xz)
                     # record miller
                     dumpfn(self.plane_miller, "miller.json")
@@ -477,17 +473,7 @@ class Gamma(Property):
             count = 0
             for ii in task_list:
                 count += 1
-                inter = os.path.join(ii, "inter.json")
-                poscar = os.path.join(ii, "POSCAR")
-                calc_type = loadfn(inter)["type"]
-                if calc_type == "vasp":
-                    self.__poscar_fix(poscar)
-                elif calc_type == "abacus":
-                    self.__stru_fix(os.path.join(ii, "STRU"))
-                else:
-                    inLammps = os.path.join(ii, "in.lammps")
-                    if count == 1:
-                        self.__inLammpes_fix(inLammps)
+                self._fix_task_output(ii, count == 1)
 
     def task_type(self):
         return self.parameter["type"]

@@ -8,9 +8,9 @@ Dispatch order is intentionally:
 from typing import Dict, Mapping, Type
 
 from apex.core.calculator import LAMMPS_INTER_TYPE
-from apex.core.property.abacus import PROPERTY_CLASS_MAP as ABACUS_PROPERTY_CLASS_MAP
-from apex.core.property.lammps import PROPERTY_CLASS_MAP as LAMMPS_PROPERTY_CLASS_MAP
-from apex.core.property.vasp import PROPERTY_CLASS_MAP as VASP_PROPERTY_CLASS_MAP
+from apex.core.property._registries import ABACUS_PROPERTY_CLASS_MAP
+from apex.core.property._registries import LAMMPS_PROPERTY_CLASS_MAP
+from apex.core.property._registries import VASP_PROPERTY_CLASS_MAP
 
 
 def _select_registry(inter_type: str) -> Mapping[str, Type]:

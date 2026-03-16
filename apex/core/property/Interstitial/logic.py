@@ -16,7 +16,7 @@ from pymatgen.core.operations import SymmOp
 
 from apex.core.calculator.lib import abacus_utils
 from apex.core.calculator.lib import lammps_utils
-from apex.core.property.Property import Property
+from apex.core.property.base import Property
 from apex.core.refine import make_refine
 from apex.core.reproduce import make_repro, post_repro
 from apex.core.structure import StructureInfo
@@ -65,6 +65,19 @@ class Interstitial(Property):
         self.cal_setting = parameter["cal_setting"]
         self.parameter = parameter
         self.inter_param = inter_param if inter_param != None else {"type": "vasp"}
+
+    def _resolve_equilibrium_structure(self, path_to_equi):
+        return (
+            os.path.join(path_to_equi, "CONTCAR"),
+            os.path.join(path_to_equi, "POSCAR"),
+            "POSCAR",
+        )
+
+    def _load_equilibrium_structure(self, equi_contcar):
+        return Structure.from_file(equi_contcar)
+
+    def _finalize_generated_tasks(self, total_task):
+        pass
 
     def make_confs(self, path_to_work, path_to_equi, refine=False):
         self.path_to_work = os.path.abspath(path_to_work)
@@ -146,22 +159,12 @@ class Interstitial(Property):
                     )
 
             else:
-                if self.inter_param["type"] == "abacus":
-                    CONTCAR = abacus_utils.final_stru(path_to_equi)
-                    POSCAR = "STRU"
-                else:
-                    CONTCAR = "CONTCAR"
-                    POSCAR = "POSCAR"
-
-                equi_contcar = os.path.join(path_to_equi, CONTCAR)
-                orig_poscar = os.path.join(path_to_equi, POSCAR)
+                equi_contcar, orig_poscar, POSCAR = self._resolve_equilibrium_structure(
+                    path_to_equi
+                )
                 if not os.path.exists(equi_contcar):
                     raise RuntimeError("please do relaxation first")
-
-                if self.inter_param["type"] == "abacus":
-                    ss = abacus_utils.stru2Structure(equi_contcar)
-                else:
-                    ss = Structure.from_file(equi_contcar)
+                ss = self._load_equilibrium_structure(equi_contcar)
                 rot = Tensor.get_ieee_rotation(ss)
                 op = SymmOp.from_rotation_and_translation(rot)
                 ss.apply_operation(op)
@@ -405,12 +408,7 @@ class Interstitial(Property):
                 else:
                     total_task = len(dss)
 
-                if self.inter_param["type"] == "abacus":
-                    for ii in range(total_task):
-                        output_task = os.path.join(self.path_to_work, "task.%06d" % ii)
-                        os.chdir(output_task)
-                        abacus_utils.poscar2stru("POSCAR", self.inter_param, "STRU")
-                        #os.remove("POSCAR")
+                self._finalize_generated_tasks(total_task)
         os.chdir(cwd)
         return self.task_list
 
