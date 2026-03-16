@@ -1,14 +1,22 @@
 """LAMMPS binding for Cohesive."""
 
-from apex.core.property._interaction_helpers import ensure_lammps_interaction
+from apex.core.property._generic_lammps import make_generic_lammps_backend_summary
+from apex.core.property._generic_lammps import make_generic_lammps_property_binding
 from ..logic import Cohesive as SharedCohesive
 
 
-class Cohesive(SharedCohesive):
-    """Cohesive implementation bound to the LAMMPS backend."""
+Cohesive = make_generic_lammps_property_binding(
+    SharedCohesive, "Cohesive", __name__
+)
 
-    def __init__(self, parameter, inter_param=None):
-        super().__init__(parameter, ensure_lammps_interaction(inter_param))
+LAMMPS_BACKEND_SUMMARY = make_generic_lammps_backend_summary(
+    property_type="cohesive",
+    what_it_computes="cohesive energy curve from scaled bulk structures",
+    default_cal_type="static",
+    default_cal_setting={},
+    structure_generation="scales the relaxed bulk structure over a lattice scan",
+    task_metadata_files=["cohesive.json"],
+)
 
 
-__all__ = ["Cohesive"]
+__all__ = ["Cohesive", "LAMMPS_BACKEND_SUMMARY"]

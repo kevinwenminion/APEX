@@ -5,10 +5,12 @@ Dispatch order is intentionally:
 2) choose property implementation under that backend registry.
 """
 
+from copy import deepcopy
 from typing import Dict, Mapping, Type
 
 from apex.core.calculator import LAMMPS_INTER_TYPE
 from apex.core.property._registries import ABACUS_PROPERTY_CLASS_MAP
+from apex.core.property._registries import LAMMPS_BACKEND_SUMMARY_MAP
 from apex.core.property._registries import LAMMPS_PROPERTY_CLASS_MAP
 from apex.core.property._registries import VASP_PROPERTY_CLASS_MAP
 
@@ -35,3 +37,11 @@ def make_property_instance(parameters: Dict, inter_param: Dict):
             f"unknown APEX type {prop_type} for interaction {inter_type}"
         )
     return prop_cls(parameters, inter_param)
+
+
+def get_lammps_backend_summary(property_type: str):
+    """Return structured LAMMPS backend metadata for a property if available."""
+    summary = LAMMPS_BACKEND_SUMMARY_MAP.get(property_type)
+    if summary is None:
+        return None
+    return deepcopy(summary)

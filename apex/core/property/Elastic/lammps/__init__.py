@@ -2,6 +2,7 @@
 
 from apex.core.property._interaction_helpers import ensure_lammps_interaction
 from ..logic import Elastic as SharedElastic
+from .input import render_elastic_lammps_input
 
 
 class Elastic(SharedElastic):
@@ -14,4 +15,4 @@ class Elastic(SharedElastic):
         return None
 
 
-__all__ = ["Elastic"]
+__all__ = ["Elastic", "render_elastic_lammps_input"]

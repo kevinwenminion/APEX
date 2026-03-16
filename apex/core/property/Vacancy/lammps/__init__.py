@@ -1,14 +1,26 @@
 """LAMMPS binding for Vacancy."""
 
-from apex.core.property._interaction_helpers import ensure_lammps_interaction
+from apex.core.property._generic_lammps import make_generic_lammps_backend_summary
+from apex.core.property._generic_lammps import make_generic_lammps_property_binding
 from ..logic import Vacancy as SharedVacancy
 
 
-class Vacancy(SharedVacancy):
-    """Vacancy implementation bound to the LAMMPS backend."""
+Vacancy = make_generic_lammps_property_binding(
+    SharedVacancy, "Vacancy", __name__
+)
 
-    def __init__(self, parameter, inter_param=None):
-        super().__init__(parameter, ensure_lammps_interaction(inter_param))
+LAMMPS_BACKEND_SUMMARY = make_generic_lammps_backend_summary(
+    property_type="vacancy",
+    what_it_computes="vacancy defect formation energies for generated defect structures",
+    default_cal_type="relaxation",
+    default_cal_setting={
+        "relax_pos": True,
+        "relax_shape": True,
+        "relax_vol": True,
+    },
+    structure_generation="removes one site from a generated supercell before LAMMPS runs",
+    task_metadata_files=["supercell.json"],
+)
 
 
-__all__ = ["Vacancy"]
+__all__ = ["Vacancy", "LAMMPS_BACKEND_SUMMARY"]

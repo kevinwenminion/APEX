@@ -432,36 +432,6 @@ class Gamma(Property):
         fix_xyz = [fix_dict[i] for i in self.add_fix]
         abacus_utils.stru_fix_atom(stru, fix_atom=fix_xyz)
 
-    def __inLammpes_fix(self, inLammps) -> None:
-        # add position fix condition of x and y of in.lammps
-        fix_dict = {"true": "0", "false": "NULL"}
-        add_fix_str = (
-                "fix             1 all setforce"
-                + " "
-                + fix_dict[self.add_fix[0]]
-                + " "
-                + fix_dict[self.add_fix[1]]
-                + " "
-                + fix_dict[self.add_fix[2]]
-                + "\n"
-        )
-        with open(inLammps, "r") as fin1:
-            contents = fin1.readlines()
-            for ii in range(len(contents)):
-                upper = re.search(r"variable        N equal count\(all\)", contents[ii])
-                lower = re.search("min_style       cg", contents[ii])
-                if lower:
-                    lower_id = ii
-                    # print(lower_id)
-                elif upper:
-                    upper_id = ii
-                    # print(upper_id)
-            del contents[lower_id + 1:upper_id - 1]
-            contents.insert(lower_id + 1, add_fix_str)
-        with open(inLammps, "w") as fin2:
-            for ii in range(len(contents)):
-                fin2.write(contents[ii])
-
     def post_process(self, task_list):
         # for no exist of self.add_fix in refine mode, skip post_process
         try:

@@ -1,11 +1,11 @@
 """LAMMPS binding for Phonon."""
 
 import os
-import re
 import shutil
 
 from apex.core.property._interaction_helpers import ensure_lammps_interaction
 from ..logic import Phonon as SharedPhonon
+from .input import render_phonon_lammps_input
 
 
 class Phonon(SharedPhonon):
@@ -13,6 +13,8 @@ class Phonon(SharedPhonon):
 
     def __init__(self, parameter, inter_param=None):
         super().__init__(parameter, ensure_lammps_interaction(inter_param))
+        if self.approach != "linear":
+            raise TypeError('LAMMPS phonon currently only supports approach="linear"')
 
     def _make_backend_tasks(self, path_to_work, ptypes, ret, ret_force_read):
         task_list = []
@@ -35,20 +37,6 @@ class Phonon(SharedPhonon):
     def _post_process_backend(self, task_list):
         for ii in task_list:
             os.chdir(ii)
-            with open("in.lammps", "r") as f1:
-                contents = f1.readlines()
-                for jj in range(len(contents)):
-                    if re.search("pair_coeff", contents[jj]):
-                        pair_line_id = jj
-                        break
-                else:
-                    raise RuntimeError("pair_coeff not found in in.lammps")
-                del contents[pair_line_id + 1 :]
-
-            with open("in.lammps", "w") as f2:
-                for line in contents:
-                    f2.write(line)
-
             phonolammps_cmd = "phonolammps in.lammps -c POSCAR --dim %s %s %s " % (
                 self.supercell_size[0],
                 self.supercell_size[1],
@@ -72,4 +60,11 @@ class Phonon(SharedPhonon):
         shutil.copyfile("band.dat", work_path / "band.dat")
 
 
-__all__ = ["Phonon"]
+def get_lammps_file_manifest(model_files, default_manifest):
+    """Return Phonon-specific LAMMPS transfer file lists."""
+    manifest = {key: list(value) for key, value in default_manifest.items()}
+    manifest["backward_files"] = ["outlog", "FORCE_CONSTANTS"]
+    return manifest
+
+
+__all__ = ["Phonon", "get_lammps_file_manifest", "render_phonon_lammps_input"]

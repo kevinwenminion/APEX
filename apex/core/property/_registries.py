@@ -1,5 +1,6 @@
 """Canonical property registries keyed by backend family."""
 
+from copy import deepcopy
 from importlib import import_module
 from pathlib import Path
 
@@ -34,6 +35,15 @@ def _load_backend_property_class(module, property_name: str, backend: str):
     return property_cls
 
 
+def _load_lammps_backend_summary(module, property_name: str):
+    summary = getattr(module, "LAMMPS_BACKEND_SUMMARY", None)
+    if summary is None:
+        return None
+    summary = deepcopy(summary)
+    summary.setdefault("property_type", property_name.lower())
+    return summary
+
+
 def _build_property_class_map(backend: str):
     registry = {}
     for property_name in _iter_property_packages():
@@ -47,6 +57,22 @@ def _build_property_class_map(backend: str):
     return registry
 
 
+def _build_lammps_backend_summary_map():
+    registry = {}
+    for property_name in _iter_property_packages():
+        backend_init = _PROPERTY_ROOT / property_name / "lammps" / "__init__.py"
+        if not backend_init.is_file():
+            continue
+        module = _load_backend_module(property_name, "lammps")
+        summary = _load_lammps_backend_summary(module, property_name)
+        if summary is None:
+            continue
+        property_type = getattr(module, "PROPERTY_TYPE", property_name.lower())
+        registry[property_type] = summary
+    return registry
+
+
 VASP_PROPERTY_CLASS_MAP = _build_property_class_map("vasp")
 ABACUS_PROPERTY_CLASS_MAP = _build_property_class_map("abacus")
 LAMMPS_PROPERTY_CLASS_MAP = _build_property_class_map("lammps")
+LAMMPS_BACKEND_SUMMARY_MAP = _build_lammps_backend_summary_map()

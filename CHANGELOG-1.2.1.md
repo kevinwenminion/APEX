@@ -54,6 +54,40 @@ Release date: 2026-03-03
   - `apex/core/property/_registries.py`
 - Updated `apex/core/property/README.md` to document the canonical layout, import rules, and migration conventions for new properties.
 
+## LAMMPS Property Backend Refactor (2026-03-17)
+
+- Expanded the property-first backend model for LAMMPS-backed properties based on:
+  - `apex/core/property/LAMMPS_refactor.md`
+  - `apex/core/property/FiniteTlatt_refactor.md`
+- Moved property-specific LAMMPS input ownership into property-local backends for:
+  - `FiniteTlatt`
+  - `Phonon`
+  - `Gamma`
+  - `Elastic`
+- Added property-local template/rendering assets under `property/<Prop>/lammps/`, including:
+  - `in.lammps`
+  - `input.py`
+  - `variables.py` where needed
+- Removed property-specific template branching from `calculator/lib/lammps_utils.py` where those templates are now owned by property backends.
+- Updated `apex/core/calculator/Lammps.py` to dispatch through property-local hooks for:
+  - input rendering
+  - forward/backward file manifests
+  - runtime policy
+- Kept `EOS` on generic input generation but moved its non-default task-local runtime policy and transfer-file rules into property-local hooks.
+- Introduced a thin generic LAMMPS backend binding helper for properties that still use generic calculator behavior:
+  - `Cohesive`
+  - `Decohesive`
+  - `Interstitial`
+  - `Surface`
+  - `Vacancy`
+- Added structured LAMMPS backend summaries discoverable from the property factory via:
+  - `get_lammps_backend_summary(...)`
+- Updated the property factory and backend registries so LAMMPS backend modules remain discoverable under the property-first layout.
+- Added focused tests for the new LAMMPS backend architecture, including:
+  - renderer/dispatch coverage
+  - runtime policy and transfer-file behavior
+  - backend summary discovery
+
 ## Submit Validation Update (2026-03-06)
 
 - Added pre-submit validation for `apex submit` to reject `structures` entries containing `.` (for dflow compatibility).

@@ -1,14 +1,27 @@
 """LAMMPS binding for Interstitial."""
 
-from apex.core.property._interaction_helpers import ensure_lammps_interaction
+from apex.core.property._generic_lammps import make_generic_lammps_backend_summary
+from apex.core.property._generic_lammps import make_generic_lammps_property_binding
 from ..logic import Interstitial as SharedInterstitial
 
 
-class Interstitial(SharedInterstitial):
-    """Interstitial implementation bound to the LAMMPS backend."""
+Interstitial = make_generic_lammps_property_binding(
+    SharedInterstitial, "Interstitial", __name__
+)
 
-    def __init__(self, parameter, inter_param=None):
-        super().__init__(parameter, ensure_lammps_interaction(inter_param))
+LAMMPS_BACKEND_SUMMARY = make_generic_lammps_backend_summary(
+    property_type="interstitial",
+    what_it_computes="interstitial defect formation energies for generated defect structures",
+    default_cal_type="relaxation",
+    default_cal_setting={
+        "relax_pos": True,
+        "relax_shape": True,
+        "relax_vol": True,
+    },
+    structure_generation="generates Voronoi or special interstitial structures before LAMMPS runs",
+    task_metadata_files=["supercell.json", "interstitial_type.json"],
+    property_metadata_files=["element.out"],
+)
 
 
-__all__ = ["Interstitial"]
+__all__ = ["Interstitial", "LAMMPS_BACKEND_SUMMARY"]

@@ -168,11 +168,11 @@ class FiniteTlatt(Property):
 
     def _symlink_variable(self, init_task: str, out_task: str):
         os.makedirs(out_task, exist_ok=True)
-        dst = os.path.join(out_task, "variable_FiniteTlatt.json")
+        dst = os.path.join(out_task, "in.variable")
         if os.path.exists(dst):
             os.remove(dst)
         os.symlink(
-            os.path.relpath(os.path.join(init_task, "variable_FiniteTlatt.json"), out_task),
+            os.path.relpath(os.path.join(init_task, "in.variable"), out_task),
             dst,
         )
 
@@ -188,8 +188,18 @@ class FiniteTlatt(Property):
         FiniteTlatt_task = {"temperature": temp, "supercell_size": self.supercell_size}
         dumpfn(FiniteTlatt_task, "FiniteTlatt.json", indent=4)
 
-        with open("variable_FiniteTlatt.in", "w") as fp:
-            fp.write(self._variable(temp))
+        # Delay backend import here to keep property logic importable without
+        # triggering the backend package during class definition.
+        from apex.core.property.FiniteTlatt.lammps.variables import (
+            render_finitetlatt_variable_file,
+        )
+
+        with open("in.variable", "w") as fp:
+            fp.write(
+                render_finitetlatt_variable_file(
+                    temp, self.supercell_size, self.cal_setting
+                )
+            )
 
     def _average_box(self, task_dir: str, supercell_size: List[int]) -> Tuple[float, float, float]:
         a_sum = b_sum = c_sum = count = 0
@@ -211,20 +221,3 @@ class FiniteTlatt(Property):
         b = b_sum / count / supercell_size[1]
         c = c_sum / count / supercell_size[2]
         return a, b, c
-
-    def _variable(self, temp: float) -> str:
-        return (
-            " # variable_FiniteTlatt.in \n"
-            f"variable temperature equal {temp:.2f}\n"
-            f"variable nx equal {self.supercell_size[0]}\n"
-            f"variable ny equal {self.supercell_size[1]}\n"
-            f"variable nz equal {self.supercell_size[2]}\n"
-            f"variable equi_step equal {self.cal_setting['equi_step']}\n"
-            f"variable N_every equal {self.cal_setting['N_every']}\n"
-            f"variable N_repeat equal {self.cal_setting['N_repeat']}\n"
-            f"variable N_freq equal {self.cal_setting['N_freq']}\n"
-            f"variable ave_step equal {self.cal_setting['ave_step']}\n"
-            f"variable timestep equal {self.cal_setting['timestep']}\n"
-            f"variable tdamp equal {self.cal_setting['tdamp']}\n"
-            f"variable pdamp equal {self.cal_setting['pdamp']}\n"
-        )
