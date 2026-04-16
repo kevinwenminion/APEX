@@ -1,9 +1,9 @@
 {
-    "structures":            ["RSS/"],
+    "structures":            ["RSS_HEA/conf_*"],
     "interaction": {
             "type":           "deepmd",
             "model":          "frozen_model.pb",
-            "type_map":       {"Mo": 0}
+            "type_map":       {"Co": 0, "Cr": 1, "Fe": 2, "Mn": 3, "Ni": 4}
         },
     "relaxation": {
             "cal_setting":   {"etol":       0,
