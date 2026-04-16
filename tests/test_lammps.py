@@ -20,6 +20,8 @@ __package__ = "tests"
 
 class TestLammps(unittest.TestCase):
     def setUp(self):
+        self._cwd = os.getcwd()
+        os.chdir(os.path.abspath(os.path.dirname(__file__)))
         self.jdata = {
             "structures": ["confs/std-fcc"],
             "interaction": {
@@ -60,6 +62,7 @@ class TestLammps(unittest.TestCase):
     def tearDown(self):
         if os.path.exists("confs/std-fcc/relaxation"):
             shutil.rmtree("confs/std-fcc/relaxation")
+        os.chdir(self._cwd)
 
     def test_set_inter_type_func(self):
         self.Lammps.set_inter_type_func()

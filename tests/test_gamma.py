@@ -15,6 +15,8 @@ __package__ = "tests"
 
 class TestGamma(unittest.TestCase):
     def setUp(self):
+        self._cwd = os.getcwd()
+        os.chdir(os.path.abspath(os.path.dirname(__file__)))
         _jdata = {
             "structures": ["confs/std-fcc"],
             "interaction": {
@@ -67,6 +69,7 @@ class TestGamma(unittest.TestCase):
             os.remove(self.res_data)
         if os.path.exists(self.ptr_data):
             os.remove(self.ptr_data)
+        os.chdir(self._cwd)
 
     def test_task_type(self):
         self.assertEqual("gamma", self.gamma.task_type())

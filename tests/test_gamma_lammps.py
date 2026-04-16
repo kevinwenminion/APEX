@@ -9,7 +9,7 @@ from apex.core.property.Gamma.lammps import Gamma
 
 class TestGammaLammps(unittest.TestCase):
     def setUp(self):
-        root = "/gauss9/home/cityu/chefan/workspace/research/tial/APEX-1.2.0"
+        root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         self.source_poscar = os.path.join(root, "tests/equi/lammps/Al-fcc.vasp")
         self.model = os.path.join(root, "tests/lammps_input/frozen_model.pb")
         self.tempdir = tempfile.TemporaryDirectory(prefix="gamma_lammps_", dir="/tmp")

@@ -16,6 +16,8 @@ __package__ = "tests"
 
 class TestEOS(unittest.TestCase):
     def setUp(self):
+        self._cwd = os.getcwd()
+        os.chdir(os.path.abspath(os.path.dirname(__file__)))
         _jdata = {
             "structures": ["confs/std-fcc"],
             "interaction": {
@@ -62,6 +64,7 @@ class TestEOS(unittest.TestCase):
             shutil.rmtree(self.equi_path)
         if os.path.exists(self.target_path):
             shutil.rmtree(self.target_path)
+        os.chdir(self._cwd)
 
     def test_task_type(self):
         self.assertEqual("eos", self.eos.task_type())

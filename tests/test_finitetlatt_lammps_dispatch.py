@@ -8,7 +8,7 @@ from apex.core.calculator.Lammps import Lammps
 
 class TestFiniteTlattLammpsDispatch(unittest.TestCase):
     def setUp(self):
-        self.root = "/gauss9/home/cityu/chefan/workspace/research/tial/APEX-1.2.0"
+        self.root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         os.chdir(self.root)
         self.source_poscar = os.path.join(self.root, "tests/equi/lammps/Al-fcc.vasp")
         self.model = os.path.join(self.root, "tests/lammps_input/frozen_model.pb")

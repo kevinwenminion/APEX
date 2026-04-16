@@ -15,7 +15,10 @@ from monty.serialization import loadfn
 
 from apex.op.relaxation_ops import RelaxMake
 from apex.op.property_ops import PropsMake
-from context import write_poscar
+try:
+    from context import write_poscar
+except ModuleNotFoundError:
+    from tests.context import write_poscar
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 __package__ = "tests"
