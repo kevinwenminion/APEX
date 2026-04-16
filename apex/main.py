@@ -21,6 +21,7 @@ from apex.archive import archive_from_args
 from apex.report import report_from_args
 from apex.gui import gui_from_args
 from apex.account import account_from_args
+from apex.rss import rss_from_args
 from apex.utils import load_config_file
 
 
@@ -461,6 +462,18 @@ def parse_args():
     )
 
     ##########################################
+    # RSS
+    parser_rss = subparsers.add_parser(
+        "rss",
+        help="Generate RSS structures from an rss.json config",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser_rss.add_argument(
+        "rss_json", type=str,
+        help="Path to rss json config file",
+    )
+
+    ##########################################
     # GUI
     parser_gui = subparsers.add_parser(
         "gui",
@@ -823,6 +836,8 @@ def main():
         )
     elif args.cmd == 'account':
         account_from_args(args)
+    elif args.cmd == 'rss':
+        rss_from_args(args.rss_json)
     else:
         raise RuntimeError(
             f"unknown command {args.cmd}\n{parser.print_help()}"

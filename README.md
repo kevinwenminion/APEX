@@ -126,6 +126,60 @@ lammps_demo/
 
 - **`global_bohrium.json`**: Provides computing resource information for Bohrium cloud platform execution.
 
+### 2.1.1 Random Solid Solution (RSS) Generation
+
+APEX provides a pseudo Monte Carlo sampler to generate random solid solutions
+with user-defined Warren-Cowley short-range order (SRO) targets.
+
+Run RSS generation with:
+
+```bash
+apex rss rss.json
+```
+
+#### Required input structure definition
+
+In `rss.json`, provide one of the following:
+
+- `parent_structure`: path to an existing structure file (typically POSCAR)
+- `parent_lattice`: programmatic parent lattice definition
+
+Example `parent_lattice`:
+
+```json
+{
+  "parent_lattice": {
+    "type": "fcc",
+    "element": "Ni",
+    "a": 3.6,
+    "supercell": [5, 5, 5]
+  }
+}
+```
+
+Current supported `parent_lattice.type`:
+`fcc`, `bcc`, `sc`, `hcp`, `diamond`.
+
+#### Key RSS parameters
+
+- `supercell` (`array[int, int, int]`): expands the loaded/built parent structure.
+  If you also set `parent_lattice.supercell`, both expansions are applied.
+- `output_structure` (`string`): output path for generated structures.
+  Default is `POSCAR`. If `num_configs > 1`, additional files are named
+  `POSCAR_002`, `POSCAR_003`, etc.
+- `compositions` (`object`): species fractions per sublattice.
+  Fractions within each sublattice must sum to `1.0`.
+
+Commonly used controls:
+
+- `sro_targets`, `shell_cutoffs`, `shell_weights`
+- `max_steps`, `temperature`, `tol`, `patience`
+- `num_configs`, `interval`, `seed`, `metadata`, `show_progress`
+
+For a complete key-by-key reference and runnable examples, see
+`examples/rss/README.md`.
+
+
 ### 2.2. Calculation Parameter Files
 
 Calculation parameter files define what properties to compute and with what parameters.
