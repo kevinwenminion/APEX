@@ -164,9 +164,9 @@ Current supported `parent_lattice.type`:
 
 - `supercell` (`array[int, int, int]`): expands the loaded/built parent structure.
   If you also set `parent_lattice.supercell`, both expansions are applied.
-- `output_structure` (`string`): output path for generated structures.
-  Default is `POSCAR`. If `num_configs > 1`, additional files are named
-  `POSCAR_002`, `POSCAR_003`, etc.
+- `output_structure` (`string`): output root directory for generated
+  configurations. Default is `RSS`. Each generated structure is written to a
+  separate `conf_###/POSCAR` directory, such as `conf_001/POSCAR`.
 - `compositions` (`object`): species fractions per sublattice.
   Fractions within each sublattice must sum to `1.0`.
 

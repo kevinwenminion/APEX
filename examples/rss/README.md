@@ -23,7 +23,8 @@ apex rss examples/rss/HEO/rss.json
 ```
 
 Generated structures are written to the output location configured in each
-`rss.json` (for example `RSS_HEA/POSCAR` or `RSS_HEO/POSCAR`).
+`rss.json` as separate `conf_###/POSCAR` folders under the configured output
+root (for example `RSS_HEA/conf_001/POSCAR` or `RSS_HEO/conf_001/POSCAR`).
 
 If `metadata` is enabled, an additional `rss_metadata.json` is generated in
 the same output directory.
@@ -37,10 +38,18 @@ examples/rss/
 │   ├── rss.json
 │   ├── parent/
 │   └── RSS_HEA/
+│       ├── conf_001/
+│       ├── conf_002/
+│       ├── conf_003/
+│       └── rss_metadata.json
 └── HEO/
     ├── rss.json
     ├── parent/
     └── RSS_HEO/
+        ├── conf_001/
+        ├── conf_002/
+        ├── conf_003/
+        └── rss_metadata.json
 ```
 
 ## Full `rss.json` Key Reference
@@ -73,9 +82,9 @@ The following keys are supported by the current implementation in
 
 4. `output_structure`
 - Type: `string`
-- Meaning: Output structure path (relative to `rss.json`), default `POSCAR`.
-- Notes: If `num_configs > 1`, additional structures are named as
-    `POSCAR_002`, `POSCAR_003`, etc.
+- Meaning: Output root directory (relative to `rss.json`), default `RSS`.
+- Notes: Each generated configuration is written to its own `conf_###`
+    directory and the structure file inside is always named `POSCAR`.
 
 ### 2) Composition and Sublattice
 
@@ -178,6 +187,8 @@ Example:
 17. `num_configs`
 - Type: `int`, default `1`
 - Meaning: Number of structures to output, useful when generate mulitple configurations for average.
+- Meaning: Number of structures to output, useful when generating multiple
+    configurations for averaging.
 
 18. `interval`
 - Type: `int`, default `100`
@@ -207,6 +218,6 @@ Example:
         }
     },
     "shell_cutoffs": [2.8],
-    "output_structure": "./RSS_HEA/POSCAR"
+    "output_structure": "./RSS_HEA"
 }
 ```

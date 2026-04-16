@@ -105,27 +105,36 @@ def _write_poscar_with_order(structure: Structure, target: Path) -> None:
     Poscar(sorted_structure).write_file(str(target))
 
 
-def _write_outputs(output_path: Path, decorated, metadata: dict) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+def _resolve_output_root(output_structure: str, root: Path) -> Path:
+    output_path = (root / output_structure).resolve()
+    if output_path.suffix or output_path.name.upper().startswith("POSCAR"):
+        return output_path.parent
+    return output_path
+
+
+def _write_outputs(output_root: Path, decorated, metadata: dict) -> None:
+    output_root.mkdir(parents=True, exist_ok=True)
 
     output_files = []
     if isinstance(decorated, list):
         for i, structure in enumerate(decorated):
-            if i == 0:
-                target = output_path
-            else:
-                target = output_path.with_name(f"{output_path.name}_{i + 1:03d}")
+            conf_dir = output_root / f"conf_{i + 1:03d}"
+            conf_dir.mkdir(parents=True, exist_ok=True)
+            target = conf_dir / "POSCAR"
             _write_poscar_with_order(structure, target)
             output_files.append(str(target))
             print(f"Wrote {target}")
     else:
-        _write_poscar_with_order(decorated, output_path)
-        output_files.append(str(output_path))
-        print(f"Wrote {output_path}")
+        conf_dir = output_root / "conf_001"
+        conf_dir.mkdir(parents=True, exist_ok=True)
+        target = conf_dir / "POSCAR"
+        _write_poscar_with_order(decorated, target)
+        output_files.append(str(target))
+        print(f"Wrote {target}")
 
     if metadata is not None:
         metadata["output_structures"] = output_files
-        metadata_path = output_path.with_name("rss_metadata.json")
+        metadata_path = output_root / "rss_metadata.json"
         metadata_path.write_text(json.dumps(_jsonable(metadata), indent=4, sort_keys=True))
         print(f"Wrote {metadata_path}")
 
@@ -154,7 +163,7 @@ def run_rss_config(config_file: str) -> None:
         )
         if sublattices is not None:
             print("Auto-assigned sublattices from supercell and composition order")
-    output_path = (root / config.get("output_structure", "POSCAR")).resolve()
+    output_root = _resolve_output_root(config.get("output_structure", "RSS"), root)
 
     write_metadata = bool(config.get("metadata", True))
 
@@ -181,7 +190,7 @@ def run_rss_config(config_file: str) -> None:
     else:
         decorated = result
         metadata = None
-    _write_outputs(output_path, decorated, metadata)
+    _write_outputs(output_root, decorated, metadata)
 
 
 def rss_from_args(config_file: str) -> None:

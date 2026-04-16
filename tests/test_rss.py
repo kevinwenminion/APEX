@@ -428,15 +428,15 @@ class TestRSSRunner(unittest.TestCase):
                 "max_steps": 100,
                 "metadata": True,
                 "seed": 1,
-                "output_structure": "RSS/POSCAR",
+                "output_structure": "RSS",
             }
             config_path = root / "rss.json"
             config_path.write_text(json.dumps(cfg, indent=2))
 
             run_rss_config(str(config_path))
 
-            self.assertTrue((root / "RSS" / "POSCAR").exists())
-            self.assertTrue((root / "RSS" / "POSCAR_002").exists())
+            self.assertTrue((root / "RSS" / "conf_001" / "POSCAR").exists())
+            self.assertTrue((root / "RSS" / "conf_002" / "POSCAR").exists())
             self.assertTrue((root / "RSS" / "rss_metadata.json").exists())
 
     def test_run_rss_config_with_parent_structure_and_no_metadata(self):
@@ -453,14 +453,14 @@ class TestRSSRunner(unittest.TestCase):
                 "shell_cutoffs": [2.8],
                 "max_steps": 100,
                 "metadata": False,
-                "output_structure": "RSS/POSCAR",
+                "output_structure": "RSS",
             }
             config_path = root / "rss.json"
             config_path.write_text(json.dumps(cfg, indent=2))
 
             run_rss_config(str(config_path))
 
-            self.assertTrue((root / "RSS" / "POSCAR").exists())
+            self.assertTrue((root / "RSS" / "conf_001" / "POSCAR").exists())
             self.assertFalse((root / "RSS" / "rss_metadata.json").exists())
 
     def test_run_rss_config_auto_assign_and_sublattice_sro_target(self):
@@ -485,7 +485,7 @@ class TestRSSRunner(unittest.TestCase):
                 "shell_cutoffs": [4.3],
                 "max_steps": 100,
                 "metadata": True,
-                "output_structure": "RSS/POSCAR",
+                "output_structure": "RSS",
             }
             config_path = root / "rss.json"
             config_path.write_text(json.dumps(cfg, indent=2))

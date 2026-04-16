@@ -34,9 +34,9 @@
     "final_objective": 0.24305555555555558,
     "initial_objective": 1.8055555555555558,
     "output_structures": [
-        "/Users/yinziqi/Documents/Codex-Space/APEX/examples/rss/RSS/POSCAR",
-        "/Users/yinziqi/Documents/Codex-Space/APEX/examples/rss/RSS/POSCAR_002",
-        "/Users/yinziqi/Documents/Codex-Space/APEX/examples/rss/RSS/POSCAR_003"
+        "/Users/yinziqi/Documents/Codex-Space/APEX/examples/rss/HEA/RSS_HEA/conf_001/POSCAR",
+        "/Users/yinziqi/Documents/Codex-Space/APEX/examples/rss/HEA/RSS_HEA/conf_002/POSCAR",
+        "/Users/yinziqi/Documents/Codex-Space/APEX/examples/rss/HEA/RSS_HEA/conf_003/POSCAR"
     ],
     "sampling": {
         "interval": 100,

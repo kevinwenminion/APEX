@@ -45,5 +45,5 @@
     "seed": 21,
     "tol": 0.001,
     "allow_vacancies": false,
-    "output_structure": "./RSS_HEA/POSCAR"
+    "output_structure": "./RSS_HEA"
 }
