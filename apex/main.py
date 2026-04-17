@@ -20,6 +20,7 @@ from apex.submit import submit_from_args
 from apex.archive import archive_from_args
 from apex.report import report_from_args
 from apex.gui import gui_from_args
+from apex.preview import preview_from_args
 from apex.account import account_from_args
 from apex.rss import rss_from_args
 from apex.utils import load_config_file
@@ -474,6 +475,50 @@ def parse_args():
     )
 
     ##########################################
+    # Preview GIFs
+    parser_preview = subparsers.add_parser(
+        "preview",
+        help="Generate preview GIFs from param_props JSON files",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser_preview.add_argument(
+        "parameters",
+        type=str,
+        nargs='+',
+        help="param_props JSON files, e.g. param_props_gamma*.json",
+    )
+    parser_preview.add_argument(
+        "--gif-fps",
+        type=int,
+        default=8,
+        help="GIF frames per second",
+    )
+    parser_preview.add_argument(
+        "--gif-dpi",
+        type=int,
+        default=140,
+        help="GIF rendering DPI",
+    )
+    parser_preview.add_argument(
+        "--gif-padding",
+        type=float,
+        default=0.30,
+        help="Relative x/y padding ratio around the global bounds",
+    )
+    parser_preview.add_argument(
+        "--gif-xshift",
+        type=float,
+        default=0.0,
+        help="Shift the rendered viewport horizontally by a fraction of the data span",
+    )
+    parser_preview.add_argument(
+        "--gif-yshift",
+        type=float,
+        default=0.0,
+        help="Shift the rendered viewport vertically by a fraction of the data span; positive values move the structure downward",
+    )
+
+    ##########################################
     # GUI
     parser_gui = subparsers.add_parser(
         "gui",
@@ -838,6 +883,8 @@ def main():
         account_from_args(args)
     elif args.cmd == 'rss':
         rss_from_args(args.rss_json)
+    elif args.cmd == 'preview':
+        preview_from_args(args)
     else:
         raise RuntimeError(
             f"unknown command {args.cmd}\n{parser.print_help()}"

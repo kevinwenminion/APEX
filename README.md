@@ -64,7 +64,7 @@ APEX currently offers calculation methods for the following alloy properties:
   - [4.7 Surface](#surface)
   - [4.8 Vacancy](#vacancy)
   - [4.9 Interstitial](#interstitial)
-  - [4.10 Gamma Line](#gamma-line-generalised-stacking-fault)
+  - [4.10 Gamma Line/Surface](#gamma-line-generalised-stacking-fault)
   - [4.11 Phonon Spectra](#phonon-spectra)
   - [4.12 Finite-Temperature Lattice Parameters](#finite-temperature-lattice-parameters)
 - [More Resources](#more-resources)
@@ -655,7 +655,7 @@ Property selection behavior:
     <img src="./docs/images/interstitial_table.png" alt="Fig3" style="zoom: 90%;">
 </div>
 
-### 4.10 Gamma line (generalized stacking fault)
+### 4.10 Gamma line/surface (generalized stacking fault)
 
 <div style="text-align: center;">
     <img src="./docs/images/gamma_demo.png" alt="Fig2" style="zoom: 35%;">
@@ -727,9 +727,32 @@ Example:
   "n_steps": 10
 }
 ```
+To preview structure behave as expected before brusting computational resource, you can use `preview` to generate a gif file to visulize it.
+
+```shell
+apex preview gammaline.json
+```
+
 
 Nested dictionaries (`fcc`, `bcc`, `hcp`, etc.) override the top-level parameters for the corresponding lattice type.
 
+Similarly, to investigate Gamma Surface, change the type to `gamma_surface`, and adjust steps accordingly.
+
+```json
+"properties": [
+        {
+            "type": "gamma_surface",
+            "req_calc": true,
+            "plane_miller": [1, 1, 0],
+            "slip_direction": [1, -1, -1],
+            "supercell_size": [1, 1, 20],
+            "vacuum_size": 15,
+            "add_fix": ["true", "true", "false"],
+            "n_steps": 20,
+            "n_steps_y": 20
+        }
+    ]
+```
 ### 4.11 Phonon spectra
 
 APEX integrates parts of [dflow-phonon](https://github.com/Chengqian-Zhang/dflow-phonon) and wraps [Phonopy](https://github.com/phonopy/phonopy) / [phonoLAMMPS](https://github.com/abelcarreras/phonolammps). [SeeK-path](https://seekpath.readthedocs.io/en/latest/index.html) automatically generates high-symmetry k-paths.

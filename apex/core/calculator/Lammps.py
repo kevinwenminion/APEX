@@ -88,6 +88,7 @@ PROPERTY_LAMMPS_INPUT_RENDERERS = {
     "elastic": _render_elastic_input,
     "finitetlatt": _render_finitetlatt_input,
     "gamma": _render_gamma_input,
+    "gamma_surface": _render_gamma_input,
     "phonon": _render_phonon_input,
 }
 
