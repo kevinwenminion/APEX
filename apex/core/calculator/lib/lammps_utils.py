@@ -277,6 +277,7 @@ def make_lammps_eval(conf, type_map, interaction, param):
     )
     ret += "dump            1 all custom 100 dump.relax id type xs ys zs fx fy fz\n"  # 06/09 give dump.relax
     ret += "run    0\n"
+    ret += "write_dump      all custom dump.relax id type xs ys zs fx fy fz modify sort id\n"
     ret += "variable        N equal count(all)\n"
     ret += "variable        V equal vol\n"
     ret += 'variable        E equal "c_mype"\n'
@@ -364,6 +365,7 @@ def make_lammps_equi(
             ret += "minimize        %e %e %d %d\n" % (etol, ftol, maxiter, maxeval)
             ret += "fix             1 all box/relax tri 0.0 \n"
     ret += "minimize        %e %e %d %d\n" % (etol, ftol, maxiter, maxeval)
+    ret += "write_dump      all custom dump.relax id type xs ys zs fx fy fz modify sort id\n"
     ret += "variable        N equal count(all)\n"
     ret += "variable        V equal vol\n"
     ret += 'variable        E equal "c_mype"\n'
@@ -441,6 +443,7 @@ def make_lammps_press_relax(
     ret += "minimize        %e %e %d %d\n" % (etol, ftol, maxiter, maxeval)
     ret += "fix             1 all box/relax aniso ${Px} \n"
     ret += "minimize        %e %e %d %d\n" % (etol, ftol, maxiter, maxeval)
+    ret += "write_dump      all custom dump.relax id type xs ys zs fx fy fz modify sort id\n"
     ret += "variable        N equal count(all)\n"
     ret += "variable        V equal vol\n"
     ret += 'variable        E equal "c_mype"\n'

@@ -1,12 +1,21 @@
 {
     "parent_lattice": {
-        "type": "fcc",
-        "element": "Ni",
-        "a": 3.6,
-        "supercell": [5, 5, 5]
+        "type": "B2",
+        "a": "auto",
+        "supercell": "auto"
     },
+    "composition_tolerance": 0.001,
+    "supercell_shape": "near_cubic",
+    "maxmium_nums_atoms": 128,
     "compositions": {
-        "all": {
+        "corner": {
+            "Co": 0.2,
+            "Cr": 0.2,
+            "Fe": 0.2,
+            "Mn": 0.2,
+            "Ni": 0.2
+        },
+        "body": {
             "Co": 0.2,
             "Cr": 0.2,
             "Fe": 0.2,

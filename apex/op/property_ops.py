@@ -196,6 +196,23 @@ class PropsPost(OP):
             inter_param = prop_param["cal_setting"]["overwrite_interaction"]
 
         abs_path_to_prop = Path.cwd() / path_to_prop
+        lammps_failures = sorted(
+            glob.glob(str(abs_path_to_prop / "task.*" / "apex_lammps_failed.json"))
+        )
+        if lammps_failures:
+            failure_tasks = [str(Path(path).parent) for path in lammps_failures]
+            dumpfn(
+                {"failed_tasks": failure_tasks},
+                abs_path_to_prop / "failed_lammps_tasks.json",
+                indent=4,
+            )
+            raise RuntimeError(
+                "LAMMPS failed for property task(s): "
+                + ", ".join(failure_tasks)
+                + ". Retrieved task directories contain apex_lammps_failed.json, "
+                "log.lammps, outlog, and any partial dump.relax files."
+            )
+
         prop = make_property_instance(prop_param, inter_param)
         param_json = os.path.join(abs_path_to_prop, "param.json")
         param_dict = prop.parameter

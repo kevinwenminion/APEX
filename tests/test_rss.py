@@ -10,7 +10,7 @@ from unittest.mock import patch
 from pymatgen.core import Lattice, Structure
 from pymatgen.io.vasp import Poscar
 
-from apex.core.lib.crys import bcc, fcc
+from apex.core.lib.crys import bcc, fcc, suggest_supercell
 from apex.core.lib.rss import (
     RSSInputError,
     _assign_initial_species,
@@ -77,6 +77,37 @@ class TestRSS(unittest.TestCase):
         self.assertIn("initial_objective", meta)
         self.assertIn("best_objective", meta)
         self.assertIn("acceptance_ratio", meta)
+
+    def test_suggest_supercell_respects_maximum_num_atoms(self):
+        compositions = {
+            "corner": {
+                "Al": 0.50287,
+                "Co": 0.12201,
+                "Cr": 0.07537,
+                "Fe": 0.04768,
+                "Mn": 0.14051,
+                "Ni": 0.11156,
+            },
+            "body": {
+                "Al": 0.00103,
+                "Co": 0.41705,
+                "Cr": 0.03401,
+                "Fe": 0.08123,
+                "Mn": 0.15832,
+                "Ni": 0.30836,
+            },
+        }
+
+        supercell = suggest_supercell(
+            "B2",
+            compositions,
+            composition_tolerance=0.01,
+            shape_mode="xy_equal_z_free",
+            maximum_num_atoms=128,
+        )
+
+        self.assertEqual(supercell, [4, 4, 4])
+        self.assertLessEqual(2 * supercell[0] * supercell[1] * supercell[2], 128)
 
     def test_multi_sublattice_oxide_cation_changes_anion_unchanged(self):
         st = Structure(
@@ -170,7 +201,7 @@ class TestRSS(unittest.TestCase):
                 shell_cutoffs=[2.6],
             )
 
-    def test_incompatible_composition_and_site_count_raises(self):
+    def test_incompatible_composition_and_site_count_warns_and_rounds(self):
         st = Structure(
             Lattice.orthorhombic(1.0, 10.0, 10.0),
             ["Na"],
@@ -179,12 +210,16 @@ class TestRSS(unittest.TestCase):
         st.make_supercell([7, 1, 1])
 
         with self.assertWarns(UserWarning):
-            with self.assertRaises(RSSInputError):
-                generate_rss(
-                    structure=st,
-                    compositions={"all": {"Co": 0.5, "Ni": 0.5}},
-                    shell_cutoffs=[1.1],
-                )
+            out = generate_rss(
+                structure=st,
+                compositions={"all": {"Co": 0.5, "Ni": 0.5}},
+                shell_cutoffs=[1.1],
+                max_steps=0,
+            )
+
+        counts = Counter(str(site.specie) for site in out.sites)
+        self.assertEqual(counts["Co"], 4)
+        self.assertEqual(counts["Ni"], 3)
 
     def test_num_configs_and_interval_return_multiple_structures(self):
         st = fcc("Ni", a=3.6)
@@ -497,6 +532,94 @@ class TestRSSRunner(unittest.TestCase):
             data = json.loads(metadata_path.read_text())
             self.assertIn("0", data["target_sro"])
             self.assertIn("Co-Mg", data["target_sro"]["0"])
+
+    def test_run_rss_config_parent_lattice_b2_auto_supercell(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = {
+                "parent_lattice": {
+                    "type": "B2",
+                    "a": "auto",
+                    "supercell": "auto",
+                },
+                "compositions": {
+                    "corner": {
+                        "Al": 0.25,
+                        "Co": 0.25,
+                        "Cr": 0.25,
+                        "Fe": 0.25,
+                    },
+                    "body": {
+                        "Al": 0.25,
+                        "Co": 0.25,
+                        "Cr": 0.25,
+                        "Fe": 0.25,
+                    },
+                },
+                "composition_tolerance": 0.001,
+                "supercell_shape": "near_cubic",
+                "maxmium_nums_atoms": 128,
+                "shell_cutoffs": [4.0],
+                "num_configs": 1,
+                "max_steps": 0,
+                "metadata": True,
+                "show_progress": False,
+                "output_structure": "RSS_B2",
+            }
+            config_path = root / "rss.json"
+            config_path.write_text(json.dumps(cfg, indent=2))
+
+            run_rss_config(str(config_path))
+
+            self.assertTrue((root / "RSS_B2" / "conf_001" / "POSCAR").exists())
+            metadata = json.loads((root / "RSS_B2" / "rss_metadata.json").read_text())
+            self.assertIn("composition_ratios", metadata)
+            self.assertIsNone(metadata["ratio_precision"])
+            self.assertAlmostEqual(metadata["composition_ratios"]["corner"]["Al"], 0.25)
+            self.assertAlmostEqual(metadata["composition_ratios"]["body"]["Co"], 0.25)
+    
+    def test_run_rss_config_bcc_auto_supercell_respects_target_atom_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = {
+                "parent_lattice": {
+                    "type": "bcc",
+                    "a": "auto",
+                    "supercell": "auto",
+                },
+                "composition_tolerance": 0.01,
+                "supercell_shape": "near_cubic",
+                "maximum_num_atoms": 198,
+                "compositions": {
+                    "all": {
+                        "Ni": 0.21212121212121213,
+                        "Al": 0.24242424242424243,
+                        "Co": 0.2727272727272727,
+                        "Cr": 0.05555555555555555,
+                        "Fe": 0.06565656565656566,
+                        "Mn": 0.15151515151515152,
+                    }
+                },
+                "shell_cutoffs": [2.6],
+                "max_steps": 0,
+                "num_configs": 1,
+                "metadata": True,
+                "show_progress": False,
+                "output_structure": "RSS_BCC",
+            }
+            config_path = root / "rss.json"
+            config_path.write_text(json.dumps(cfg, indent=2))
+
+            run_rss_config(str(config_path))
+
+            metadata = json.loads((root / "RSS_BCC" / "rss_metadata.json").read_text())
+            counts = metadata["composition_counts"]["all"]
+            self.assertEqual(counts["Ni"], 42)
+            self.assertEqual(counts["Al"], 48)
+            self.assertEqual(counts["Co"], 54)
+            self.assertEqual(counts["Cr"], 11)
+            self.assertEqual(counts["Fe"], 13)
+            self.assertEqual(counts["Mn"], 30)
 
     def test_run_rss_config_rejects_legacy_sro_targets(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -376,7 +376,7 @@ class GammaSurface(Property):
         if trans_matrix.any():
             reoriented_lattice_vectors = [trans_matrix.dot(v) for v in slab.lattice.matrix]
             slab = Structure(
-                lattice=np.matrix(reoriented_lattice_vectors),
+                lattice=np.array(reoriented_lattice_vectors),
                 coords=slab.frac_coords,
                 species=slab.species,
             )
@@ -390,13 +390,14 @@ class GammaSurface(Property):
             sorted_species.append(species)
 
         a, b, c = slab.lattice.matrix
-        slab_height = slab.lattice.matrix[2][2]
-        if slab_height >= 0:
-            self.is_flip = False
-            elong_scale = 1 + (self.vacuum_size / slab_height)
-        else:
-            self.is_flip = True
-            elong_scale = 1 + (-self.vacuum_size / slab_height)
+        slab_height = float(np.linalg.norm(c))
+        if slab_height <= 1e-12:
+            raise RuntimeError(
+                "Gamma surface slab has near-zero thickness after lattice reorientation; "
+                "cannot apply vacuum. Please check plane_miller/slip_direction/supercell_size."
+            )
+        self.is_flip = False
+        elong_scale = 1 + (self.vacuum_size / slab_height)
         new_lattice = [a, b, elong_scale * c]
         new_frac_coords = []
         for ii in range(len(sorted_frac_coords)):
@@ -404,10 +405,10 @@ class GammaSurface(Property):
             coord[2] = coord[2] / elong_scale
             new_frac_coords.append(coord)
         slab = Structure(
-            lattice=np.matrix(new_lattice), coords=new_frac_coords, species=sorted_species
+            lattice=np.array(new_lattice), coords=new_frac_coords, species=sorted_species
         )
 
-        plane_shift_frac = self.plane_shift * structure.lattice.c / slab.lattice.matrix[2][2]
+        plane_shift_frac = self.plane_shift * structure.lattice.c / slab_height
         avg_c = np.average([coord[2] for coord in slab.frac_coords])
         slab.translate_sites(list(range(len(slab))), [0, 0, 0.5 - avg_c - plane_shift_frac])
         slab.make_supercell(
@@ -470,6 +471,12 @@ class GammaSurface(Property):
             )
             all_tasks.sort()
             task_result_slab_equi = loadfn(os.path.join(all_tasks[0], "result_task.json"))
+            if task_result_slab_equi is None:
+                raise RuntimeError(
+                    "GammaSurface postprocess failed: reference task "
+                    f"{all_tasks[0]} has no valid result_task.json. "
+                    "Check remote main-logs and task outputs such as log.lammps and dump.relax."
+                )
             slip_length_x = loadfn(os.path.join(all_tasks[0], "slip_length_x.json"))
             slip_length_y = loadfn(os.path.join(all_tasks[0], "slip_length_y.json"))
             equi_path = os.path.abspath(
@@ -480,6 +487,21 @@ class GammaSurface(Property):
 
             for ii in all_tasks:
                 task_result = loadfn(os.path.join(ii, "result_task.json"))
+                if task_result is None:
+                    missing_files = []
+                    for output_name in ("log.lammps", "dump.relax"):
+                        if not os.path.isfile(os.path.join(ii, output_name)):
+                            missing_files.append(output_name)
+                    missing_text = (
+                        f" Missing output file(s): {', '.join(missing_files)}."
+                        if missing_files
+                        else ""
+                    )
+                    raise RuntimeError(
+                        "GammaSurface postprocess failed: task "
+                        f"{ii} has no valid result_task.json.{missing_text} "
+                        "Check the failed task main-logs and LAMMPS outputs."
+                    )
                 natoms = np.sum(task_result["atom_numbs"])
                 epa = task_result["energies"][-1] / natoms
                 equi_epa_slab = task_result_slab_equi["energies"][-1] / natoms

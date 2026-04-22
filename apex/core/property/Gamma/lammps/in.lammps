@@ -14,6 +14,7 @@ thermo_style    custom step pe pxx pyy pzz pxy pxz pyz lx ly lz vol c_mype
 dump            1 all custom 100 dump.relax id type xs ys zs fx fy fz
 min_style       cg
 __SETFORCE_FIX____MINIMIZE__
+write_dump      all custom dump.relax id type xs ys zs fx fy fz modify sort id
 variable        N equal count(all)
 variable        V equal vol
 variable        E equal "c_mype"

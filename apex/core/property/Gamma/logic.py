@@ -341,7 +341,7 @@ class Gamma(Property):
         # If a transform matrix is passed, reorient the slab
         if trans_matrix.any():
             reoriented_lattice_vectors = [trans_matrix.dot(v) for v in slab.lattice.matrix]
-            slab = Structure(lattice=np.matrix(reoriented_lattice_vectors),
+            slab = Structure(lattice=np.array(reoriented_lattice_vectors),
                              coords=slab.frac_coords, species=slab.species)
         # Order the atoms in the lattice in the increasing order of the third lattice direction
         # n_atoms_slab = len(slab.frac_coords)
@@ -367,7 +367,7 @@ class Gamma(Property):
             coord = sorted_frac_coords[ii].copy()
             coord[2] = coord[2] / elong_scale
             new_frac_coords.append(coord)
-        slab = Structure(lattice=np.matrix(new_lattice),
+        slab = Structure(lattice=np.array(new_lattice),
                          coords=new_frac_coords, species=sorted_species)
         # Slab area
         # slab_area = np.linalg.norm(np.cross(slab.lattice.matrix[0], slab.lattice.matrix[1]))

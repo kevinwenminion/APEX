@@ -149,16 +149,18 @@ Example `parent_lattice`:
 ```json
 {
   "parent_lattice": {
-    "type": "fcc",
-    "element": "Ni",
-    "a": 3.6,
-    "supercell": [5, 5, 5]
-  }
+    "type": "B2",
+    "a": "auto",
+    "supercell": "auto"
+  },
+  "composition_tolerance": 0.001,
+  "supercell_shape": "near_cubic",
+  "maxmium_nums_atoms": 128
 }
 ```
 
 Current supported `parent_lattice.type`:
-`fcc`, `bcc`, `sc`, `hcp`, `diamond`.
+`fcc`, `bcc`, `sc`, `hcp`, `diamond`, `B2`, `L12`, `L10`.
 
 #### Key RSS parameters
 

@@ -4,7 +4,10 @@ import argparse
 import os
 import re
 
-from pymatgen.analysis.structure_matcher import StructureMatcher
+try:
+    from pymatgen.core.structure_matcher import StructureMatcher
+except ImportError:  # pragma: no cover
+    from pymatgen.analysis.structure_matcher import StructureMatcher
 from pymatgen.ext.matproj import Composition, MPRester
 
 from apex.core.lib import crys

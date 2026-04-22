@@ -4,6 +4,7 @@ import glob
 import shutil
 import tempfile
 import logging
+import json
 from typing import List
 from multiprocessing import Pool
 from monty.serialization import loadfn
@@ -48,6 +49,87 @@ def validate_submit_paths(parameter_dicts: List[dict]) -> None:
             "Please rename the path/file and update param.json.\n"
             "Offending entries:\n- " + "\n- ".join(violations)
         )
+
+
+def _infer_type_map_from_structure_file(structure_file: str) -> dict:
+    structure_name = os.path.basename(structure_file)
+    symbols = []
+    if structure_name in {"POSCAR", "CONTCAR"}:
+        from pymatgen.io.vasp import Poscar
+
+        poscar = Poscar.from_file(structure_file)
+        symbols = [str(item) for item in poscar.site_symbols]
+    else:
+        from pymatgen.core import Structure
+
+        structure = Structure.from_file(structure_file)
+        seen = set()
+        for site in structure.sites:
+            symbol = str(site.specie)
+            if symbol not in seen:
+                seen.add(symbol)
+                symbols.append(symbol)
+
+    if not symbols:
+        raise RuntimeError(f"Cannot infer type_map from structure file: {structure_file}")
+    return {symbol: idx for idx, symbol in enumerate(symbols)}
+
+
+def _resolve_first_structure_file(param_path: str, structures: List[str]) -> str:
+    base_dir = os.path.dirname(os.path.abspath(param_path))
+    for pattern in structures:
+        if os.path.isabs(pattern):
+            search_patterns = [pattern]
+        else:
+            search_patterns = [os.path.join(base_dir, pattern), pattern]
+
+        matches = []
+        for search_pattern in search_patterns:
+            matches.extend(glob.glob(search_pattern))
+        matches = sorted(set(matches))
+        for match in matches:
+            if os.path.isdir(match):
+                for candidate in ("POSCAR", "CONTCAR", "STRU"):
+                    candidate_path = os.path.join(match, candidate)
+                    if os.path.isfile(candidate_path):
+                        return candidate_path
+                nested_poscars = sorted(glob.glob(os.path.join(match, "conf_*", "POSCAR")))
+                if nested_poscars:
+                    return nested_poscars[0]
+            elif os.path.isfile(match):
+                return match
+    raise RuntimeError(
+        "Cannot infer interaction.type_map automatically: no structure file found "
+        f"for patterns {structures} from {param_path}"
+    )
+
+
+def auto_fill_type_map_from_poscar(parameter_dict: dict, param_path: str) -> bool:
+    interaction = parameter_dict.get("interaction")
+    if not isinstance(interaction, dict):
+        return False
+    if interaction.get("type") in {"vasp", "abacus"}:
+        return False
+
+    current_type_map = interaction.get("type_map")
+    if isinstance(current_type_map, dict) and current_type_map:
+        return False
+    if current_type_map not in (None, "", "auto"):
+        return False
+
+    structures = parameter_dict.get("structures", [])
+    if not isinstance(structures, list) or not structures:
+        raise RuntimeError(
+            "Cannot infer interaction.type_map automatically because `structures` is empty"
+        )
+
+    structure_file = _resolve_first_structure_file(param_path, structures)
+    interaction["type_map"] = _infer_type_map_from_structure_file(structure_file)
+
+    with open(param_path, "w", encoding="utf-8") as fp:
+        json.dump(parameter_dict, fp, indent=4)
+        fp.write("\n")
+    return True
 
 
 def _glob_structures_in_work_dir(work_dir: os.PathLike, pattern: str) -> List[str]:
@@ -501,8 +583,17 @@ def submit_from_args(
         is_debug=False,
 ):
     print('-------Submit Workflow Mode-------')
+    parameter_dicts = []
+    for param_path in parameters:
+        param_dict = loadfn(param_path)
+        if auto_fill_type_map_from_poscar(param_dict, param_path):
+            print(
+                f"Auto-filled interaction.type_map from structure file and updated: {param_path}"
+            )
+        parameter_dicts.append(param_dict)
+
     submit_workflow(
-        parameter_dicts=[loadfn(jj) for jj in parameters],
+        parameter_dicts=parameter_dicts,
         config_dict=load_config_file(config_file),
         work_dirs=work_dirs,
         indicated_flow_type=indicated_flow_type,

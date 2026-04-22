@@ -27,6 +27,80 @@ class RSSInputError(ValueError):
     """Raised when RSS generator inputs are invalid."""
 
 
+def resolve_parent_lattice_auto(
+    parent_lattice: dict,
+    compositions: dict,
+    composition_tolerance: float = 0.005,
+    shape_mode: str = "near_cubic",
+    maximum_num_atoms=None,
+) -> None:
+    """Resolve optional auto lattice parameters and supercell in-place."""
+    from apex.core.lib.crys import estimate_lattice_constant, suggest_supercell
+
+    if not parent_lattice:
+        return
+
+    parent_type = parent_lattice["type"]
+    supported_auto_types = {"bcc", "fcc", "hcp", "tetragonal", "B2", "L12", "L10"}
+    if "species" not in parent_lattice:
+        if parent_type == "B2":
+            parent_lattice["species"] = [
+                next(iter(compositions["corner"])),
+                next(iter(compositions["body"])),
+            ]
+        elif parent_type == "L12":
+            face_species = next(iter(compositions["face"]))
+            parent_lattice["species"] = [
+                next(iter(compositions["corner"])),
+                face_species,
+                face_species,
+                face_species,
+            ]
+        elif parent_type == "L10":
+            parent_lattice["species"] = [
+                next(iter(compositions["layer_A"])),
+                next(iter(compositions["layer_B"])),
+            ]
+
+    should_resolve_a = (
+        parent_lattice.get("a") == "auto"
+        or ("a" not in parent_lattice and parent_type in supported_auto_types)
+        or (parent_lattice.get("a") is None and parent_type in supported_auto_types)
+    )
+    if should_resolve_a:
+        resolved_lattice = estimate_lattice_constant(
+            parent_type,
+            compositions,
+            c_over_a=parent_lattice.get("c_over_a"),
+        )
+        parent_lattice["a"] = resolved_lattice["a"]
+        if (
+            "c" in resolved_lattice
+            and ("c" not in parent_lattice or parent_lattice.get("c") == "auto")
+        ):
+            parent_lattice["c"] = resolved_lattice["c"]
+
+    should_suggest_supercell = (
+        parent_lattice.get("supercell") == "auto"
+        or (
+            "supercell" not in parent_lattice
+            and parent_type in supported_auto_types
+        )
+        or (
+            parent_lattice.get("supercell") is None
+            and parent_type in supported_auto_types
+        )
+    )
+    if should_suggest_supercell:
+        parent_lattice["supercell"] = suggest_supercell(
+            parent_type,
+            compositions,
+            composition_tolerance=composition_tolerance,
+            shape_mode=shape_mode,
+            maximum_num_atoms=maximum_num_atoms,
+        )
+
+
 def _canonical_pair(a: str, b: str) -> Tuple[str, str]:
     return (a, b) if a <= b else (b, a)
 
@@ -149,32 +223,52 @@ def _integerize_composition_counts(
     composition: Dict[str, float],
     tol: float,
 ) -> Dict[str, int]:
-    counts = {}
-    running_total = 0
+    if nsites <= 0:
+        raise RSSInputError("nsites must be positive")
+
+    targets = []
+    expected_total = 0.0
     for species, frac in composition.items():
-        value = frac * nsites
-        rounded = int(round(value))
-        if abs(value - rounded) > tol:
-            warnings.warn(
-                "Given supercell/site count cannot realize requested composition "
-                f"for species '{species}' (target count {value} on {nsites} sites)",
-                UserWarning,
-            )
-            raise RSSInputError(
-                f"Composition {composition} incompatible with {nsites} sites "
-                f"(species '{species}' gives non-integer count {value})"
-            )
-        counts[species] = rounded
-        running_total += rounded
-    if running_total != nsites:
+        value = float(frac) * nsites
+        targets.append((species, value))
+        expected_total += value
+
+    if abs(expected_total - nsites) > max(tol, 1e-12) * max(1, nsites):
         warnings.warn(
             "Given supercell/site count cannot realize requested composition "
-            f"(integerized counts sum to {running_total}, expected {nsites})",
+            f"(target total {expected_total} on {nsites} sites)",
             UserWarning,
         )
         raise RSSInputError(
-            f"Integerized composition counts {counts} do not sum to site count {nsites}"
+            f"Composition {composition} incompatible with {nsites} sites"
         )
+
+    counts = {}
+    residuals = []
+    running_total = 0
+    for species, value in targets:
+        base = int(math.floor(value + 1e-12))
+        counts[species] = base
+        running_total += base
+        residuals.append((value - base, species))
+
+    remaining = nsites - running_total
+    if remaining > 0:
+        residuals.sort(key=lambda item: (-item[0], str(item[1])))
+        for _, species in residuals[:remaining]:
+            counts[species] += 1
+
+    max_error = max(
+        (abs(value - counts[species]) for species, value in targets),
+        default=0.0,
+    )
+    if max_error > tol:
+        warnings.warn(
+            "Given supercell/site count cannot realize requested composition exactly; "
+            "using nearest integer counts",
+            UserWarning,
+        )
+
     return counts
 
 
@@ -428,6 +522,7 @@ def generate_rss(
     interval=100,
     show_progress=False,
     patience=None,
+    ratio_precision=None,
     return_metadata=False,
 ):
     """Generate a random solid solution structure with optional SRO targeting.
@@ -455,6 +550,10 @@ def generate_rss(
         patience = int(patience)
         if patience <= 0:
             raise RSSInputError("patience must be a positive integer or None")
+    if ratio_precision is not None:
+        ratio_precision = int(ratio_precision)
+        if ratio_precision < 0:
+            raise RSSInputError("ratio_precision must be a non-negative integer or None")
 
     rng = random.Random(seed)
     parent = structure.copy()
@@ -476,6 +575,19 @@ def generate_rss(
         )
         composition_counts[sub_name] = counts
         _assign_initial_species(state_species, indices, counts, rng)
+
+    composition_ratios = {}
+    for sub_name, counts in composition_counts.items():
+        total_sites = len(sub_map[sub_name])
+        sub_ratios = {
+            species: count / total_sites for species, count in counts.items()
+        }
+        if ratio_precision is not None:
+            sub_ratios = {
+                species: round(value, ratio_precision)
+                for species, value in sub_ratios.items()
+            }
+        composition_ratios[sub_name] = sub_ratios
 
     if shell_cutoffs is None:
         cutoffs = _default_shell_cutoffs(parent)
@@ -635,13 +747,15 @@ def generate_rss(
             "SRO gap remains large after optimization: "
             f"best_rmse={best_gap_metrics['rmse']:.4f}, "
             f"best_max_abs={best_gap_metrics['max_abs']:.4f}. "
-            "Consider increasing max_steps and temperature.",
+            "Consider increasing max_steps or temperature.",
             UserWarning,
         )
 
     metadata = {
         "seed": seed,
         "composition_counts": composition_counts,
+        "composition_ratios": composition_ratios,
+        "ratio_precision": ratio_precision,
         "shell_cutoffs": list(cutoffs),
         "target_sro": target_sro,
         "achieved_sro": best_sro,

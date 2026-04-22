@@ -5,9 +5,14 @@ import re
 from shutil import copyfile
 
 from monty.serialization import dumpfn, loadfn
-from pymatgen.analysis.elasticity.elastic import ElasticTensor
-from pymatgen.analysis.elasticity.strain import DeformedStructureSet, Strain
-from pymatgen.analysis.elasticity.stress import Stress
+try:
+    from pymatgen.core.elasticity.elastic import ElasticTensor
+    from pymatgen.core.elasticity.strain import DeformedStructureSet, Strain
+    from pymatgen.core.elasticity.stress import Stress
+except ImportError:  # pragma: no cover
+    from pymatgen.analysis.elasticity.elastic import ElasticTensor
+    from pymatgen.analysis.elasticity.strain import DeformedStructureSet, Strain
+    from pymatgen.analysis.elasticity.stress import Stress
 from pymatgen.core.structure import Structure
 from pymatgen.core.tensors import Tensor
 from pymatgen.core.operations import SymmOp

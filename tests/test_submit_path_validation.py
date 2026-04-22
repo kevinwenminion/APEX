@@ -1,6 +1,9 @@
 import unittest
+import tempfile
+import os
+import json
 
-from apex.submit import validate_submit_paths
+from apex.submit import validate_submit_paths, auto_fill_type_map_from_poscar
 
 
 class TestSubmitPathValidation(unittest.TestCase):
@@ -41,3 +44,94 @@ class TestSubmitPathValidation(unittest.TestCase):
             }
         ]
         validate_submit_paths(params)
+
+    def test_auto_fill_type_map_from_poscar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            structure_dir = os.path.join(tmp, "B2_HEA")
+            os.makedirs(structure_dir, exist_ok=True)
+            poscar_path = os.path.join(structure_dir, "POSCAR")
+            with open(poscar_path, "w", encoding="utf-8") as fp:
+                fp.write(
+                    "Test\n"
+                    "1.0\n"
+                    "1 0 0\n"
+                    "0 1 0\n"
+                    "0 0 1\n"
+                    "Al Co Cr Fe Mn Ni\n"
+                    "1 1 1 1 1 1\n"
+                    "Direct\n"
+                    "0 0 0\n"
+                    "0.1 0.1 0.1\n"
+                    "0.2 0.2 0.2\n"
+                    "0.3 0.3 0.3\n"
+                    "0.4 0.4 0.4\n"
+                    "0.5 0.5 0.5\n"
+                )
+
+            param_path = os.path.join(tmp, "param_props_gammasurface.json")
+            payload = {
+                "structures": ["B2_HEA"],
+                "interaction": {
+                    "type": "deepmd",
+                    "model": "../frozen_model.pb",
+                    "type_map": "auto",
+                },
+            }
+            with open(param_path, "w", encoding="utf-8") as fp:
+                json.dump(payload, fp, indent=4)
+
+            changed = auto_fill_type_map_from_poscar(payload, param_path)
+            self.assertTrue(changed)
+            self.assertEqual(
+                payload["interaction"]["type_map"],
+                {"Al": 0, "Co": 1, "Cr": 2, "Fe": 3, "Mn": 4, "Ni": 5},
+            )
+
+            with open(param_path, "r", encoding="utf-8") as fp:
+                persisted = json.load(fp)
+            self.assertEqual(
+                persisted["interaction"]["type_map"],
+                {"Al": 0, "Co": 1, "Cr": 2, "Fe": 3, "Mn": 4, "Ni": 5},
+            )
+
+    def test_auto_fill_type_map_from_rss_conf_subdir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            structure_dir = os.path.join(tmp, "B2_HEA", "conf_001")
+            os.makedirs(structure_dir, exist_ok=True)
+            poscar_path = os.path.join(structure_dir, "POSCAR")
+            with open(poscar_path, "w", encoding="utf-8") as fp:
+                fp.write(
+                    "Test\n"
+                    "1.0\n"
+                    "1 0 0\n"
+                    "0 1 0\n"
+                    "0 0 1\n"
+                    "Al Co Cr Fe Mn Ni\n"
+                    "1 1 1 1 1 1\n"
+                    "Direct\n"
+                    "0 0 0\n"
+                    "0.1 0.1 0.1\n"
+                    "0.2 0.2 0.2\n"
+                    "0.3 0.3 0.3\n"
+                    "0.4 0.4 0.4\n"
+                    "0.5 0.5 0.5\n"
+                )
+
+            param_path = os.path.join(tmp, "param_props_gammasurface.json")
+            payload = {
+                "structures": ["B2_HEA"],
+                "interaction": {
+                    "type": "deepmd",
+                    "model": "../frozen_model.pb",
+                    "type_map": "auto",
+                },
+            }
+            with open(param_path, "w", encoding="utf-8") as fp:
+                json.dump(payload, fp, indent=4)
+
+            changed = auto_fill_type_map_from_poscar(payload, param_path)
+            self.assertTrue(changed)
+            self.assertEqual(
+                payload["interaction"]["type_map"],
+                {"Al": 0, "Co": 1, "Cr": 2, "Fe": 3, "Mn": 4, "Ni": 5},
+            )

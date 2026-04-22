@@ -4,8 +4,18 @@ from pathlib import Path
 from pymatgen.core import Structure
 from pymatgen.io.vasp import Poscar
 
-from apex.core.lib.crys import bcc, fcc, hcp, sc, diamond
-from apex.core.lib.rss import generate_rss
+from apex.core.lib.crys import (
+    B2,
+    L10,
+    L12,
+    bcc,
+    diamond,
+    fcc,
+    hcp,
+    sc,
+    tetragonal,
+)
+from apex.core.lib.rss import generate_rss, resolve_parent_lattice_auto
 
 
 def _jsonable(value):
@@ -27,17 +37,35 @@ def _build_parent_lattice(config: dict) -> Structure:
     lattice = config.get("type")
     element = config.get("element", "Ni")
     a = float(config.get("a", 3.6))
+    c = config.get("c")
+    if c is not None:
+        c = float(c)
     builder_map = {
         "fcc": fcc,
         "bcc": bcc,
         "sc": sc,
         "hcp": hcp,
+        "tetragonal": tetragonal,
         "diamond": diamond,
+        "B2": B2,
+        "L12": L12,
+        "L10": L10,
     }
     if lattice not in builder_map:
         raise ValueError(f"Unsupported parent_lattice type: {lattice}")
 
-    parent = builder_map[lattice](element, a=a)
+    builder = builder_map[lattice]
+    if lattice in {"B2", "L12", "L10"}:
+        kwargs = {"a": a}
+        if lattice == "L10" and c is not None:
+            kwargs["c"] = c
+        if "species" in config:
+            kwargs["species"] = config["species"]
+        parent = builder(**kwargs)
+    elif lattice in {"hcp", "tetragonal"} and c is not None:
+        parent = builder(element, a=a, c=c)
+    else:
+        parent = builder(element, a=a)
     supercell = config.get("supercell")
     if supercell is not None:
         parent.make_supercell(supercell)
@@ -68,6 +96,16 @@ def _auto_assign_sublattices(
         raise ValueError("compositions must be a non-empty dict")
     if set(compositions.keys()) == {"all"}:
         return None
+
+    labels = expanded_parent.site_properties.get("sublattice")
+    if labels is not None and set(compositions.keys()) == set(labels):
+        sublattices = []
+        for name in compositions.keys():
+            site_indices = [
+                idx for idx, label in enumerate(labels) if str(label) == str(name)
+            ]
+            sublattices.append({"name": name, "site_indices": site_indices})
+        return sublattices
 
     n_base = len(base_parent)
     n_expanded = len(expanded_parent)
@@ -146,6 +184,21 @@ def run_rss_config(config_file: str) -> None:
 
     root = config_path.parent
     config = json.loads(config_path.read_text())
+    composition_tol = config.get("composition_tolerance", 0.005)
+    shape_mode = config.get("supercell_shape", "near_cubic")
+    maximum_num_atoms = config.get(
+        "maximum_num_atoms",
+        config.get("maximum_nums_atoms", config.get("maxmium_nums_atoms")),
+    )
+    parent_lattice = config.get("parent_lattice")
+    if parent_lattice is not None:
+        resolve_parent_lattice_auto(
+            parent_lattice,
+            config["compositions"],
+            composition_tolerance=composition_tol,
+            shape_mode=shape_mode,
+            maximum_num_atoms=maximum_num_atoms,
+        )
 
     parent = _load_or_build_parent(root, config)
     base_parent = parent.copy()
@@ -155,7 +208,9 @@ def run_rss_config(config_file: str) -> None:
         parent.make_supercell(supercell)
 
     sublattices = config.get("sublattices")
-    if sublattices is None and supercell is not None:
+    if sublattices is None and (
+        supercell is not None or "sublattice" in parent.site_properties
+    ):
         sublattices = _auto_assign_sublattices(
             compositions=config["compositions"],
             base_parent=base_parent,
