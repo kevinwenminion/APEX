@@ -45,6 +45,8 @@ def return_prop_class(prop_type: str):
 
 def return_prop_type(prop: str):
     try:
+        if prop.startswith('gamma_surface'):
+            return 'gamma_surface'
         prop_type = prop.split('_')[0]
     except AttributeError:
         return None
@@ -223,6 +225,9 @@ class DashReportApp:
                     # set color and width of reference lines
                     if prop_type != 'vacancy':
                         for trace in iter(traces):
+                            trace_type = getattr(trace, 'type', '')
+                            if trace_type == 'heatmap':
+                                continue
                             if trace_name.split('/')[-1] in ['DFT', 'REF']:
                                 trace.update({'line': {'color': 'black', 'width': REF_LINE_SIZE},
                                               'marker': {'color': 'black', 'size': REF_MARKER_SIZE}})

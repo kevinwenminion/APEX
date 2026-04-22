@@ -23,6 +23,7 @@ from apex.gui import gui_from_args
 from apex.preview import preview_from_args
 from apex.account import account_from_args
 from apex.rss import rss_from_args
+from apex.replay_failed import replay_failed_from_args
 from apex.utils import load_config_file
 
 
@@ -311,6 +312,12 @@ def parse_args():
         default=None,
         help="retry a step in a running workflow with step ID (experimental)",
     )
+    parser_retry.add_argument(
+        "-c", "--config",
+        type=str, nargs='?',
+        default='./global.json',
+        help="The json file to config workflow",
+    )
     # resume workflow
     parser_resume = subparsers.add_parser(
         "resume",
@@ -519,6 +526,79 @@ def parse_args():
     )
 
     ##########################################
+    # Replay failed artifacts
+    parser_replay_failed = subparsers.add_parser(
+        "replay-failed",
+        help="Extract retryable tasks from .failed-artifacts and build a minimal resubmit workspace",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser_replay_failed.add_argument(
+        "-w", "--work",
+        type=str,
+        default='.',
+        help="Base working directory that contains .failed-artifacts",
+    )
+    parser_replay_failed.add_argument(
+        "--failed-root",
+        type=str,
+        default=".failed-artifacts",
+        help="Relative path from --work to failed artifacts root",
+    )
+    parser_replay_failed.add_argument(
+        "-o", "--output",
+        type=str,
+        default="./retry_workspace",
+        help="Output directory for the minimal retry workspace",
+    )
+    parser_replay_failed.add_argument(
+        "--manifest",
+        type=str,
+        default=None,
+        help="Optional path for retry manifest json",
+    )
+    parser_replay_failed.add_argument(
+        "--submit",
+        action="store_true",
+        help="Automatically run apex submit for the generated retry workspace",
+    )
+    parser_replay_failed.add_argument(
+        "--parameter",
+        type=str,
+        nargs='+',
+        default=None,
+        help="Parameter json files used when --submit is enabled",
+    )
+    parser_replay_failed.add_argument(
+        "-c", "--config",
+        type=str,
+        nargs='?',
+        default='./global.json',
+        help="Global config json used when --submit is enabled",
+    )
+    parser_replay_failed.add_argument(
+        '-f', "--flow",
+        choices=['relax', 'props', 'joint'],
+        default=None,
+        help="Optional flow type passed to apex submit when --submit is enabled",
+    )
+    parser_replay_failed.add_argument(
+        "-n", "--name",
+        type=str,
+        default=None,
+        help="Optional workflow name used when --submit is enabled",
+    )
+    parser_replay_failed.add_argument(
+        "-s", "--submit_only",
+        action="store_true",
+        help="Submit workflow only without auto-retrieval when --submit is enabled",
+    )
+    parser_replay_failed.add_argument(
+        "-d", "--debug",
+        action="store_true",
+        help="Run submit via local debug mode when --submit is enabled",
+    )
+
+    ##########################################
     # GUI
     parser_gui = subparsers.add_parser(
         "gui",
@@ -639,6 +719,92 @@ def get_id_from_record(work_dir: os.PathLike, operation_name: str = None) -> str
         with open(workflow_log, 'a') as f:
             f.write('\t'.join(modified_record))
     return workflow_id
+
+
+def _safe_get(obj, key, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _get_step_artifacts(step):
+    outputs = _safe_get(step, "outputs")
+    if outputs is None:
+        return {}
+    return _safe_get(outputs, "artifacts", {}) or {}
+
+
+def _sanitize_path_token(text: str) -> str:
+    cleaned = "".join(ch if (ch.isalnum() or ch in "._-") else "-" for ch in str(text))
+    return cleaned.strip("-") or "unknown"
+
+
+def _collect_step_with_children(wf_info, root_step):
+    all_steps = [root_step]
+    queue = [root_step]
+    seen = set()
+    while queue:
+        step = queue.pop(0)
+        step_id = _safe_get(step, "id")
+        if not step_id or step_id in seen:
+            continue
+        seen.add(step_id)
+        try:
+            children = wf_info.get_step(parent_id=step_id, sort_by_generation=True)
+        except Exception:
+            children = []
+        all_steps.extend(children)
+        queue.extend(children)
+    return all_steps
+
+
+def _download_failure_artifacts_for_step(wf_info, root_step, key, work_dir):
+    preferred_names = {
+        "main-logs",
+        "main_logs",
+        "backward_dir",
+        "retrieve_path",
+        "output_all",
+        "output_work_path",
+        "task_paths",
+    }
+    related_steps = _collect_step_with_children(wf_info, root_step)
+    downloaded = 0
+    seen = set()
+    for step in related_steps:
+        step_id = _safe_get(step, "id", "step")
+        step_name = _safe_get(step, "displayName", _safe_get(step, "name", step_id))
+        artifacts = _get_step_artifacts(step)
+        for art_name, artifact in artifacts.items():
+            if art_name.startswith("dflow_"):
+                continue
+            if art_name not in preferred_names:
+                continue
+            key_tuple = (str(step_id), str(art_name))
+            if key_tuple in seen:
+                continue
+            seen.add(key_tuple)
+
+            target_dir = os.path.join(
+                work_dir,
+                ".failed-artifacts",
+                _sanitize_path_token(key),
+                _sanitize_path_token(step_name),
+                _sanitize_path_token(art_name),
+            )
+            os.makedirs(target_dir, exist_ok=True)
+            try:
+                download_artifact(artifact=artifact, path=target_dir)
+                downloaded += 1
+            except Exception as exc:
+                logging.warning(
+                    "Failed to download artifact %s for step %s (%s): %s",
+                    art_name,
+                    step_name,
+                    key,
+                    exc,
+                )
+    return downloaded
 
 
 def main():
@@ -840,14 +1006,34 @@ def main():
         for key in download_keys:
             step = wf_info.get_step(key=key)[0]
             task_left -= 1
-            if step['phase'] == 'Succeeded':
+            phase = step['phase']
+            if phase == 'Succeeded':
                 logging.info(f"Retrieving {key}...({task_left} more left)")
-                download_artifact(
-                    artifact=step.outputs.artifacts['retrieve_path'],
-                    path=work_dir
-                )
+                try:
+                    download_artifact(
+                        artifact=step.outputs.artifacts['retrieve_path'],
+                        path=work_dir
+                    )
+                except Exception as exc:
+                    logging.warning(f"Retrieve {key} failed: {exc}")
             else:
-                logging.warning(f"Step {key} with status: {step['phase']} will be skipping...({task_left} more left)")
+                logging.warning(
+                    f"Step {key} with status: {phase} is not Succeeded; "
+                    f"trying to retrieve failure artifacts...({task_left} more left)"
+                )
+                downloaded = _download_failure_artifacts_for_step(
+                    wf_info=wf_info,
+                    root_step=step,
+                    key=key,
+                    work_dir=work_dir,
+                )
+                if downloaded == 0:
+                    logging.warning(f"No retrievable failure artifacts found for {key}")
+                else:
+                    logging.info(
+                        f"Retrieved {downloaded} failure artifact groups for {key} "
+                        f"under {os.path.join(work_dir, '.failed-artifacts')}"
+                    )
     elif args.cmd == 'do':
         header()
         do_step_from_args(
@@ -881,6 +1067,8 @@ def main():
         )
     elif args.cmd == 'account':
         account_from_args(args)
+    elif args.cmd == 'replay-failed':
+        replay_failed_from_args(args)
     elif args.cmd == 'rss':
         rss_from_args(args.rss_json)
     elif args.cmd == 'preview':

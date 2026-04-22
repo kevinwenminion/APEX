@@ -553,14 +553,28 @@ class VacancyReport(PropertyReport):
 
 class GammaReport(PropertyReport):
     @staticmethod
+    def _parse_key(key):
+        key_str = str(key)
+        if "," in key_str:
+            frac_x_str, frac_y_str = key_str.split(",", 1)
+            return frac_x_str.strip(), frac_y_str.strip()
+        return key_str.strip(), None
+
+    @staticmethod
     def plotly_graph(res_data: dict, name: str, **kwargs):
         displ = []
         displ_length = []
         fault_en = []
         for k, v in res_data.items():
-            displ.append(k)
-            displ_length.append(v[0])
-            fault_en.append(v[1])
+            frac_x_str, frac_y_str = GammaReport._parse_key(k)
+            if frac_y_str is None:
+                displ.append(float(frac_x_str))
+                displ_length.append(v[0])
+                fault_en.append(v[1])
+            else:
+                displ.append(f"{frac_x_str},{frac_y_str}")
+                displ_length.append(v[0])
+                fault_en.append(v[2] if len(v) > 2 else v[1])
         df = pd.DataFrame({
             "displacement": displ,
             "displace_length": displ_length,
@@ -602,11 +616,15 @@ class GammaReport(PropertyReport):
         struct_en = []
         equi_en = []
         for k, v in res_data.items():
-            displ.append(float(k))
-            displ_length.append(v[0])
-            fault_en.append(v[1])
-            struct_en.append((v[2]))
-            equi_en.append(v[3])
+            frac_x_str, frac_y_str = GammaReport._parse_key(k)
+            displ.append(float(frac_x_str))
+            if frac_y_str is not None:
+                displ_length.append(float(frac_y_str))
+            else:
+                displ_length.append(v[0])
+            fault_en.append(v[1] if len(v) > 1 else v[0])
+            struct_en.append((v[2] if len(v) > 2 else v[-2]))
+            equi_en.append(v[3] if len(v) > 3 else v[-1])
         df = pd.DataFrame({
             "Slip_frac": round_format(displ, decimal),
             "Slip_Length (Å)": round_format(displ_length, decimal),
