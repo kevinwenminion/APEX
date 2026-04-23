@@ -24,3 +24,18 @@ class TestGuiCliParser(unittest.TestCase):
         self.assertEqual(args.host, "0.0.0.0")
         self.assertEqual(args.port, 9001)
         self.assertTrue(args.no_browser)
+
+    def test_report_no_browser_option(self):
+        with patch.object(sys, "argv", ["apex", "report", "--no-browser"]):
+            _, args = parse_args()
+
+        self.assertEqual(args.cmd, "report")
+        self.assertTrue(args.no_browser)
+
+    def test_report_custom_host_port(self):
+        with patch.object(sys, "argv", ["apex", "report", "-H", "0.0.0.0", "-p", "8071"]):
+            _, args = parse_args()
+
+        self.assertEqual(args.cmd, "report")
+        self.assertEqual(args.host, "0.0.0.0")
+        self.assertEqual(args.port, 8071)

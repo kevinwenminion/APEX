@@ -15,7 +15,7 @@
 在 `ApexGuiApp._build_layout()` 中定义了 4 个页签：
 
 1. `Submit`
-2. `Manage`
+2. `Log`
 3. `Advanced`
 4. `Account`
 
@@ -50,6 +50,15 @@ Submit 页底部按钮：
 - `Submit`：在后台执行：
   `nohup apex submit param.json -c global.json > apex.log 2>&1 &`
 
+Submit 页现在区分两类上传：
+
+- `上传结构`：结构文件默认保存到当前 `Workdir/confs/`。若 `confs/` 不存在会自动创建。
+- `上传文件`：普通文件直接保存到当前 `Working Directory`。
+
+上传结果显示在 `Command Output`。
+
+`structures` 不再只靠手改 `param.json`，而是通过下拉框从当前 `Workdir` 中选择结构目录/结构路径，避免误写成 `.`。
+
 ### 3.3 提交前日志冲突确认
 
 `Submit` 时会检查当前目录是否已有 `apex.log`。
@@ -59,20 +68,27 @@ Submit 页底部按钮：
 
 ### 3.4 interaction 编辑规则
 
-- `lammps`：显示 `interaction.model` + `interaction.type_map` 元素输入。
-- `vasp/abacus`：显示动态表格（可加行/删行）：
-  - `vasp`：2 列（`element`, `potcar`）
-  - `abacus`：3 列（`element`, `potcar`, `orb_file`）
+- `lammps`：显示 `interaction.type` 和 `interaction.model` 文件选择框。
+- `vasp`：不再手选 `interaction.type`。GUI 会从所选结构目录中的 `POSCAR` 自动读取元素顺序，并在 `Workdir` 中优先检索 `vasp_input/` 下后缀匹配的 POTCAR 文件；缺失元素会用灰字提示“请提交对应元素的POTCAR”。
+- `abacus`：不再手选 `interaction.type`。GUI 会从所选结构目录中的 `POSCAR` 自动读取元素顺序，并在 `Workdir` 中优先检索 `abacus_input/` 下前缀匹配的赝势/轨道文件；缺失项会用灰字提示。
 
-`interaction.incar` 和 INCAR/INPUT 编辑区放在右侧 Advanced Setting。
+右侧 Advanced Setting 中：
+
+- `vasp` 使用 `interaction.incar`
+- `abacus` 使用 `interaction.input`
+
+若对应文件不存在，`Apply/Submit` 时会按 profile 默认模板自动创建：
+
+- `vasp_input/INCAR`
+- `abacus_input/INPUT`
 
 ### 3.5 Properties 勾选行为
 
 `param.json` 中 `properties` 只保留勾选项；未勾选项不写入输出 JSON。
 
-## 4. Manage 页面
+## 4. Log 页面
 
-`Manage` 已简化为仅查看 `apex.log`：
+`Log` 页面用于查看 `apex.log`：
 
 - 手动刷新按钮
 - 3 秒自动刷新
@@ -126,6 +142,8 @@ GUI 中提供对 `apex account` 存储的可视化覆盖编辑。
 - `_update_interaction_table`：动态增删行与 profile 切换重置。
 - `_generate_param_editor`：根据 UI 状态生成 `param.json` 文本。
 - `_handle_command`：处理 `Apply/Submit/Confirm/Advanced` 动作。
+- `_handle_structure_upload`：把结构文件上传到当前 `Workdir/confs/`。
+- `_handle_file_upload`：把普通文件上传到当前 `Workdir`。
 - `_handle_account`：处理 Account 刷新与覆盖保存。
 - `_update_manage_log`：更新 `apex.log` 展示。
 

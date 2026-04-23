@@ -261,6 +261,70 @@ class TestFlowModule(unittest.TestCase):
         fg.workflow.terminate.assert_called_once()
         self.assertIn("workflow terminated", message)
 
+    def test_terminate_workflow_after_relax_failure_ignores_completed_workflow_error(self):
+        fg = self._make_flow_generator()
+        fg.workflow = mock.Mock()
+        fg.workflow.terminate.side_effect = RuntimeError(
+            'cannot shutdown a completed workflow: workflow: "wf", namespace: "argo"'
+        )
+
+        message = fg._terminate_workflow_after_relax_failure()
+
+        fg.workflow.terminate.assert_called_once()
+        self.assertIn("workflow already completed", message)
+        self.assertNotIn("failed to terminate workflow automatically", message)
+
+    def test_set_props_tasks_requires_relax_task_or_pre_relaxed_structure(self):
+        fg = self._make_flow_generator()
+        props_param = {
+            "structures": ["conf-001"],
+            "interaction": {"type": "lammps"},
+            "properties": [{"type": "eos"}],
+        }
+
+        with tempfile.TemporaryDirectory(prefix="apex-flow-") as td:
+            cwd = os.getcwd()
+            os.chdir(td)
+            try:
+                os.makedirs("conf-001")
+                with self.assertRaisesRegex(
+                        RuntimeError,
+                        "No relaxation task or pre-relaxed result is available for conf-001",
+                ):
+                    fg._set_props_tasks(
+                        relax_tasks=[],
+                        props_parameter=props_param,
+                        base_work_artifact="base-artifact",
+                        pre_relaxed=[],
+                    )
+            finally:
+                os.chdir(cwd)
+
+    def test_submit_joint_rejects_empty_workflow_before_dflow_submit(self):
+        fg = self._make_flow_generator()
+        fake_workflow = mock.Mock()
+
+        with tempfile.TemporaryDirectory(prefix="apex-flow-") as td, \
+                mock.patch("apex.flow.Workflow", return_value=fake_workflow), \
+                mock.patch("apex.flow.upload_artifact", return_value="base-artifact"), \
+                mock.patch.object(fg, "_set_relax_tasks", return_value=([], [])), \
+                mock.patch.object(fg, "_set_props_tasks", return_value=([], [])):
+            with self.assertRaisesRegex(RuntimeError, "No joint workflow tasks to submit"):
+                fg.submit_joint(
+                    upload_path=td,
+                    download_path=td,
+                    relax_parameter={"structures": ["conf-*"]},
+                    props_parameter={
+                        "structures": ["conf-*"],
+                        "interaction": {"type": "lammps"},
+                        "properties": [{"type": "eos"}],
+                    },
+                    submit_only=True,
+                )
+
+        fake_workflow.add.assert_not_called()
+        fake_workflow.submit.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -74,9 +74,12 @@ def generate_test_datasets():
 
 
 class DashReportApp:
-    def __init__(self, datasets):
+    def __init__(self, datasets, open_browser: bool = False, host: str = "127.0.0.1", port: int = 8070):
         dbc_css = "https://cdn.jsdelivr.net/gh/AnnMarieW/dash-bootstrap-templates/dbc.min.css"
         self.datasets = datasets
+        self.open_browser = open_browser
+        self.host = host
+        self.port = port
         self.all_confs = set()
         self.all_props = set()
         self.app = dash.Dash(
@@ -354,17 +357,16 @@ class DashReportApp:
              State(f'table-{index}', 'data')])(self.csv_copy)
 
     def run(self, **kwargs):
-        Timer(1.2, self.open_webpage).start()
-        print('Dash server running... (See the report at http://127.0.0.1:8050/)')
-        print('NOTE: If two Dash pages are automatically opened in your browser, you can close the first one.')
+        if self.open_browser:
+            Timer(1.2, self.open_webpage).start()
+        print(f'Dash server running... (See the report at http://{self.host}:{self.port}/)')
         print('NOTE: If the clipboard buttons do not function well, try to reload the page one time.')
         print('NOTE: Do not over-refresh the page as duplicate errors may occur. '
               'If did, stop the server and re-execute the apex report command.')
-        self.app.run(**kwargs)
+        self.app.run(host=self.host, port=self.port, **kwargs)
 
-    @staticmethod
-    def open_webpage():
-        webbrowser.open('http://127.0.0.1:8050/')
+    def open_webpage(self):
+        webbrowser.open(f'http://{self.host}:{self.port}/')
 
 
 if __name__ == "__main__":

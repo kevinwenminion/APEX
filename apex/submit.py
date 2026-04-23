@@ -186,6 +186,12 @@ def pack_upload_dir(
         conf_dirs.extend(glob.glob(conf))
     conf_dirs = list(set(conf_dirs))
     conf_dirs.sort()
+    if not conf_dirs:
+        os.chdir(cwd)
+        raise RuntimeError(
+            "No structures matched the submitted patterns under "
+            f"{os.path.abspath(work_dir)}: {confs}"
+        )
 
     def relaxation_finished(conf_path: str) -> bool:
         res = os.path.join(conf_path, "relaxation", "relax_task", "result.json")
@@ -265,8 +271,9 @@ def pack_upload_dir(
         # Split finished vs pending relaxations so we can skip reruns while still running properties
         rerun_finished = relax_param.get("interaction", {}).get("rerun_finished", True)
         skip_finished_properties = []
+        finished_relax = []
+        pending_relax = conf_dirs
         if rerun_finished is False:
-            finished_relax = []
             pending_relax = []
             for c in conf_dirs:
                 if relaxation_finished(c):
@@ -280,14 +287,16 @@ def pack_upload_dir(
             prop_param["pre_relaxed_structures"] = finished_relax
         # Detect per-structure finished properties when rerun_finished is False for that property
         properties = prop_param.get("properties", [])
+        requested_property_tasks = []
         for c in conf_dirs:
             for prop in properties:
-                if prop.get("rerun_finished", True):
-                    continue
                 do_refine, suffix = handle_prop_suffix(prop)
                 if not suffix:
                     continue
                 prop_dir_name = f"{prop['type']}_{suffix}"
+                requested_property_tasks.append((c, prop_dir_name))
+                if prop.get("rerun_finished", True):
+                    continue
                 prop_dir = os.path.join(c, prop_dir_name)
                 rjson = os.path.join(prop_dir, "result.json")
                 rout = os.path.join(prop_dir, "result.out")
@@ -296,6 +305,18 @@ def pack_upload_dir(
                     skip_finished_properties.append([c, prop_dir_name])
         if skip_finished_properties:
             prop_param["skip_finished_properties"] = skip_finished_properties
+        skipped_property_tasks = {
+            (item[0], item[1])
+            for item in skip_finished_properties
+        }
+        if not pending_relax and requested_property_tasks \
+                and all(item in skipped_property_tasks for item in requested_property_tasks):
+            os.chdir(cwd)
+            raise RuntimeError(
+                "All requested joint relaxation and property tasks are already finished; "
+                "nothing to submit. Set rerun_finished=true for relaxation or at least "
+                "one property if you want to resubmit."
+            )
     refine_init_name_list = []
     # backup all existing property work directories
     if flow_type in ['props', 'joint']:

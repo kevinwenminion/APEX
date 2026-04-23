@@ -339,6 +339,9 @@ class FlowGenerator:
             self.workflow.terminate()
             return "workflow terminated to stop pending/running property calculations"
         except Exception as exc:
+            message = str(exc)
+            if "cannot shutdown a completed workflow" in message:
+                return "workflow already completed before automatic termination; root cause is the failed relaxation step above"
             return f"failed to terminate workflow automatically: {exc}"
 
     def _raise_if_failed(self, failed_entries, workflow_kind: str):
@@ -766,21 +769,7 @@ class FlowGenerator:
             props_parameter: dict
     ) -> [List[Step], List[str]]:
 
-        simplePropertySteps = SimplePropertySteps(
-            name='property-flow',
-            make_op=self.props_make_op,
-            run_op=self.run_op,
-            post_op=self.props_post_op,
-            make_image=self.make_image,
-            run_image=self.run_image,
-            post_image=self.post_image,
-            run_command=self.run_command,
-            calculator=self.calculator,
-            group_size=self.group_size,
-            pool_size=self.pool_size,
-            executor=self.executor,
-            upload_python_packages=self.upload_python_packages
-        )
+        simplePropertySteps = None
 
         confs = props_parameter["structures"]
         interaction = props_parameter["interaction"]
@@ -825,6 +814,22 @@ class FlowGenerator:
             clean_subflow_id = re.sub(r'[^a-zA-Z0-9-]', '-', flow_id_list[ii]).lower()
             subflow_key = f'propertycal-{clean_subflow_id}'
             subprops_key_list.append(subflow_key)
+            if simplePropertySteps is None:
+                simplePropertySteps = SimplePropertySteps(
+                    name='property-flow',
+                    make_op=self.props_make_op,
+                    run_op=self.run_op,
+                    post_op=self.props_post_op,
+                    make_image=self.make_image,
+                    run_image=self.run_image,
+                    post_image=self.post_image,
+                    run_command=self.run_command,
+                    calculator=self.calculator,
+                    group_size=self.group_size,
+                    pool_size=self.pool_size,
+                    executor=self.executor,
+                    upload_python_packages=self.upload_python_packages
+                )
             subprops_list.append(
                 Step(
                     name=f'Subprop-cal-{clean_subflow_id}',
@@ -855,21 +860,7 @@ class FlowGenerator:
         """
         Task-based property subflows keyed to corresponding relax tasks for DAG scheduling.
         """
-        simplePropertySteps = SimplePropertySteps(
-            name='property-flow',
-            make_op=self.props_make_op,
-            run_op=self.run_op,
-            post_op=self.props_post_op,
-            make_image=self.make_image,
-            run_image=self.run_image,
-            post_image=self.post_image,
-            run_command=self.run_command,
-            calculator=self.calculator,
-            group_size=self.group_size,
-            pool_size=self.pool_size,
-            executor=self.executor,
-            upload_python_packages=self.upload_python_packages
-        )
+        simplePropertySteps = None
 
         confs = props_parameter["structures"]
         interaction = props_parameter["interaction"]
@@ -927,9 +918,14 @@ class FlowGenerator:
             # choose artifact source: from corresponding relax task if exists; otherwise from base upload (pre-relaxed)
             if ii in relax_map:
                 input_artifact = relax_map[ii].outputs.artifacts["output_all"]
-            else:
+            elif ii in pre_relaxed_set:
                 # pre-relaxed data exists in uploaded workspace
                 input_artifact = base_work_artifact
+            else:
+                raise RuntimeError(
+                    f"No relaxation task or pre-relaxed result is available for {ii}; "
+                    "cannot create joint property task."
+                )
 
             # skip property if already finished and rerun_finished=False
             prop_dir_name = os.path.basename(path_to_prop)
@@ -939,6 +935,22 @@ class FlowGenerator:
                 continue
 
             subprops_key_list.append(subflow_key)
+            if simplePropertySteps is None:
+                simplePropertySteps = SimplePropertySteps(
+                    name='property-flow',
+                    make_op=self.props_make_op,
+                    run_op=self.run_op,
+                    post_op=self.props_post_op,
+                    make_image=self.make_image,
+                    run_image=self.run_image,
+                    post_image=self.post_image,
+                    run_command=self.run_command,
+                    calculator=self.calculator,
+                    group_size=self.group_size,
+                    pool_size=self.pool_size,
+                    executor=self.executor,
+                    upload_python_packages=self.upload_python_packages
+                )
             subprops_list.append(
                 Task(
                     name=f'Subprop-cal-{clean_subflow_id}',
@@ -1042,7 +1054,6 @@ class FlowGenerator:
             input_work_dir=base_artifact,
             relax_parameter=self.relax_param
         )
-        self.workflow.add(relaxation_tasks)
 
         # per-structure property tasks depending on corresponding relaxation task
         subprops_list, subprops_key_list = self._set_props_tasks(
@@ -1052,7 +1063,16 @@ class FlowGenerator:
             pre_relaxed=self.props_param.get("pre_relaxed_structures", [])
         )
 
-        self.workflow.add(subprops_list)
+        if not relaxation_tasks and not subprops_list:
+            raise RuntimeError(
+                "No joint workflow tasks to submit. All requested relaxations and "
+                "properties appear to be finished, or no structures matched the "
+                "submitted patterns."
+            )
+        if relaxation_tasks:
+            self.workflow.add(relaxation_tasks)
+        if subprops_list:
+            self.workflow.add(subprops_list)
         self.workflow.submit()
         self.dump_flow_id()
         if not submit_only:

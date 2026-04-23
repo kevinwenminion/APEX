@@ -467,6 +467,23 @@ def parse_args():
         default='.',
         help="(Optional) Working directory or json file path to be reported",
     )
+    parser_report.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not automatically open the report in a browser",
+    )
+    parser_report.add_argument(
+        "-H", "--host",
+        type=str,
+        default="127.0.0.1",
+        help="Host for the report Dash server",
+    )
+    parser_report.add_argument(
+        "-p", "--port",
+        type=int,
+        default=8070,
+        help="Port for the report Dash server",
+    )
 
     ##########################################
     # RSS
@@ -983,6 +1000,9 @@ def main():
         report_from_args(
             config_file=args.config,
             path_list=args.work,
+            open_browser=not args.no_browser,
+            host=args.host,
+            port=args.port,
         )
     elif args.cmd == 'gui':
         header()

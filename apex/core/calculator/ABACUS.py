@@ -16,7 +16,7 @@ class ABACUS(Task):
     def __init__(self, inter_parameter, path_to_poscar):
         self.inter = inter_parameter
         self.inter_type = inter_parameter["type"]
-        self.incar = inter_parameter.get("incar", {})
+        self.incar = inter_parameter.get("input") or inter_parameter.get("incar", {})
         self.potcar_prefix = inter_parameter.get("potcar_prefix", "")
         self.potcars = inter_parameter.get("potcars", None)
         self.orbfile = inter_parameter.get("orb_files", None)
@@ -229,4 +229,3 @@ class ABACUS(Task):
 
     def backward_files(self, property_type="relaxation"):
         return []
-

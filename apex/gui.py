@@ -1,4 +1,8 @@
+import base64
+import binascii
 import copy
+import glob
+import io
 import json
 import os
 import re
@@ -6,7 +10,9 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import webbrowser
+import zipfile
 from datetime import datetime
 from threading import Timer
 from typing import Any, Dict, List, Optional, Tuple
@@ -29,6 +35,8 @@ PROFILE_NAMES = ("lammps", "vasp", "abacus")
 DEFAULT_PROFILE = "lammps"
 
 LMP_INTERACTION_TYPE_OPTIONS = ["eam_alloy", "deepmd", "meam", "tersoff", "sw", "reaxff"]
+MISSING_POTCAR_HINT = "请提交对应元素的POTCAR"
+MISSING_ORB_HINT = "请提交对应元素的ORB"
 
 
 def _load_json_file(path: str) -> Dict[str, Any]:
@@ -89,6 +97,13 @@ def _extract_selected_properties(param_template: Dict[str, Any]) -> List[str]:
     return selected
 
 
+def _extract_structure_defaults(param_template: Dict[str, Any]) -> List[str]:
+    structures = param_template.get("structures", [])
+    if not isinstance(structures, list):
+        return []
+    return [str(item).strip() for item in structures if str(item).strip()]
+
+
 def _extract_interaction_defaults(param_template: Dict[str, Any]) -> Tuple[str, str, List[str]]:
     interaction = param_template.get("interaction")
     if not isinstance(interaction, dict):
@@ -107,10 +122,17 @@ def _extract_interaction_defaults(param_template: Dict[str, Any]) -> Tuple[str, 
     return interaction_type, interaction_model, elements
 
 
-def _extract_interaction_incar(param_template: Dict[str, Any]) -> str:
+def _interaction_path_key(profile: str) -> str:
+    return "input" if profile == "abacus" else "incar"
+
+
+def _extract_interaction_incar(param_template: Dict[str, Any], profile: str = DEFAULT_PROFILE) -> str:
     interaction = param_template.get("interaction")
     if not isinstance(interaction, dict):
         return ""
+    key = _interaction_path_key(profile)
+    if key == "input":
+        return interaction.get("input") or interaction.get("incar") or ""
     return interaction.get("incar") or ""
 
 
@@ -157,6 +179,8 @@ def _rows_to_mapping(keys: List[str], values: List[str]) -> Dict[str, str]:
     for key, value in zip(keys, values):
         k = (key or "").strip()
         v = _strip_parenthetical_suffix(value or "")
+        if v.startswith(MISSING_POTCAR_HINT) or v.startswith(MISSING_ORB_HINT):
+            continue
         if k and v and k not in mapping:
             mapping[k] = v
     return mapping
@@ -195,6 +219,115 @@ def _interaction_table_rows_from_template(profile: str, param_template: Dict[str
     return rows
 
 
+def _resolve_first_structure_file_for_gui(workdir: str, structures: List[str]) -> str:
+    abs_workdir = _normalize_workdir(workdir)
+    for pattern in structures or []:
+        clean_pattern = (pattern or "").strip()
+        if not clean_pattern:
+            continue
+        search_pattern = clean_pattern if os.path.isabs(clean_pattern) else os.path.join(abs_workdir, clean_pattern)
+        for match in sorted(set(glob.glob(search_pattern))):
+            if os.path.isfile(match):
+                if os.path.basename(match) == "POSCAR":
+                    return match
+                continue
+            if os.path.isdir(match):
+                for candidate in ("POSCAR", "CONTCAR", "STRU"):
+                    candidate_path = os.path.join(match, candidate)
+                    if os.path.isfile(candidate_path):
+                        return candidate_path
+                nested = sorted(glob.glob(os.path.join(match, "**", "POSCAR"), recursive=True))
+                if nested:
+                    return nested[0]
+    return ""
+
+
+def _extract_elements_from_selected_structure(workdir: str, structures: List[str]) -> List[str]:
+    structure_file = _resolve_first_structure_file_for_gui(workdir, structures)
+    if not structure_file or os.path.basename(structure_file) != "POSCAR":
+        return []
+    try:
+        from pymatgen.io.vasp import Poscar
+
+        return [str(symbol) for symbol in Poscar.from_file(structure_file).site_symbols]
+    except Exception:
+        return []
+
+
+def _workdir_files(workdir: str, preferred_subdir: str = "") -> List[str]:
+    abs_workdir = _normalize_workdir(workdir)
+    candidates: List[str] = []
+    for root, dirnames, filenames in os.walk(abs_workdir):
+        dirnames[:] = sorted(name for name in dirnames if not name.startswith("."))
+        rel_root = os.path.relpath(root, abs_workdir)
+        for filename in sorted(filenames):
+            if filename.startswith("."):
+                continue
+            rel_path = filename if rel_root == "." else os.path.join(rel_root, filename)
+            rel_path = rel_path.replace(os.path.sep, "/")
+            candidates.append(rel_path)
+    if preferred_subdir:
+        preferred_prefix = preferred_subdir.strip("/").replace(os.path.sep, "/") + "/"
+        candidates.sort(key=lambda item: (0 if item.startswith(preferred_prefix) else 1, len(item), item.lower()))
+    else:
+        candidates.sort(key=lambda item: (len(item), item.lower()))
+    return candidates
+
+
+def _suffix_token_match(path: str, element: str) -> bool:
+    basename = os.path.basename(path)
+    tokens = [tok for tok in re.split(r"[._-]+", basename) if tok]
+    return bool(tokens) and tokens[-1].lower() == element.lower()
+
+
+def _prefix_token_match(path: str, element: str) -> bool:
+    basename = os.path.basename(path)
+    tokens = [tok for tok in re.split(r"[._-]+", basename) if tok]
+    return bool(tokens) and tokens[0].lower() == element.lower()
+
+
+def _autodetect_interaction_rows(profile: str, workdir: str, structures: List[str], param_template: Dict[str, Any]) -> List[Dict[str, str]]:
+    if profile not in {"vasp", "abacus"}:
+        return _interaction_table_rows_from_template(profile, param_template)
+
+    elements = _extract_elements_from_selected_structure(workdir, structures)
+    if not elements:
+        return _interaction_table_rows_from_template(profile, param_template)
+
+    preferred_dir = "vasp_input" if profile == "vasp" else "abacus_input"
+    files = _workdir_files(workdir, preferred_subdir=preferred_dir)
+    rows: List[Dict[str, str]] = []
+    for element in elements:
+        if profile == "vasp":
+            potcar = next((os.path.basename(path) for path in files if _suffix_token_match(path, element)), "")
+            rows.append({"element": element, "potcar": potcar or MISSING_POTCAR_HINT})
+        else:
+            potcar = next(
+                (
+                    os.path.basename(path)
+                    for path in files
+                    if _prefix_token_match(path, element) and not os.path.basename(path).lower().endswith(".orb")
+                ),
+                "",
+            )
+            orb_file = next(
+                (
+                    os.path.basename(path)
+                    for path in files
+                    if _prefix_token_match(path, element) and os.path.basename(path).lower().endswith(".orb")
+                ),
+                "",
+            )
+            rows.append(
+                {
+                    "element": element,
+                    "potcar": potcar or MISSING_POTCAR_HINT,
+                    "orb_file": orb_file or MISSING_ORB_HINT,
+                }
+            )
+    return rows
+
+
 def _interaction_editor_label(profile: str) -> str:
     if profile == "vasp":
         return "INCAR 编辑区"
@@ -203,8 +336,16 @@ def _interaction_editor_label(profile: str) -> str:
     return "INCAR/INPUT 编辑区"
 
 
+def _interaction_path_label(profile: str) -> str:
+    return "interaction.input" if profile == "abacus" else "interaction.incar (会自动去掉括号备注)"
+
+
+def _interaction_path_placeholder(profile: str) -> str:
+    return "abacus_input/INPUT" if profile == "abacus" else "vasp_input/INCAR"
+
+
 def _load_profile_incar_content(profile: str, param_template: Dict[str, Any]) -> str:
-    incar_rel = _strip_parenthetical_suffix(_extract_interaction_incar(param_template))
+    incar_rel = _strip_parenthetical_suffix(_extract_interaction_incar(param_template, profile))
     if not incar_rel:
         return ""
     source_path = os.path.join(_profile_dir(profile), "param_interaction", incar_rel)
@@ -236,12 +377,12 @@ def _resolve_triggered_id():
     return triggered[0]["prop_id"].split(".")[0]
 
 
-def _run_apex_command(arguments: List[str]) -> Dict[str, Any]:
+def _run_apex_command(arguments: List[str], cwd: Optional[str] = None) -> Dict[str, Any]:
     command = [sys.executable, "-m", "apex", *arguments]
     try:
         completed = subprocess.run(
             command,
-            cwd=os.getcwd(),
+            cwd=cwd or os.getcwd(),
             capture_output=True,
             text=True,
             check=False,
@@ -296,7 +437,9 @@ def _format_feedback(payload: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _read_log_tail(log_path: str = "apex.log", max_lines: int = 400) -> str:
+def _read_log_tail(log_path: str = "apex.log", max_lines: int = 400, workdir: Optional[str] = None) -> str:
+    if not os.path.isabs(log_path):
+        log_path = os.path.join(_normalize_workdir(workdir or os.getcwd()), log_path)
     if not os.path.isfile(log_path):
         return f"{log_path} not found yet. Run submit first."
     try:
@@ -402,12 +545,19 @@ def _save_account_overwrite(
 
 
 DEFAULT_PARAM_TEMPLATE = _load_profile_param_template(DEFAULT_PROFILE)
+DEFAULT_STRUCTURE_PATHS = _extract_structure_defaults(DEFAULT_PARAM_TEMPLATE)
 DEFAULT_PROPERTY_TYPES = _extract_property_types(DEFAULT_PARAM_TEMPLATE)
 DEFAULT_SELECTED_PROPERTIES = _extract_selected_properties(DEFAULT_PARAM_TEMPLATE)
-DEFAULT_INTERACTION_TYPE, DEFAULT_INTERACTION_MODEL, DEFAULT_INTERACTION_ELEMENTS = _extract_interaction_defaults(
+DEFAULT_INTERACTION_TYPE, DEFAULT_INTERACTION_MODEL, _DEFAULT_INTERACTION_ELEMENTS = _extract_interaction_defaults(
     DEFAULT_PARAM_TEMPLATE
 )
 DEFAULT_ACCOUNT_STATE = _load_account_state()
+DEFAULT_SUBMIT_STATE = {
+    "workdir": os.getcwd(),
+    "workflow_id": "",
+    "global_file": "global.json",
+    "param_file": "param.json",
+}
 
 
 def _build_param_payload(
@@ -416,13 +566,15 @@ def _build_param_payload(
     selected_properties: List[str],
     interaction_type: str,
     interaction_model: str,
-    element_slots: List[str],
+    selected_structures: List[str] = None,
+    element_slots: List[str] = None,
     interaction_incar: str = "",
     interaction_rows: List[Dict[str, str]] = None,
     base_template: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
     template = base_template if isinstance(base_template, dict) and base_template else DEFAULT_PARAM_TEMPLATE
     payload = copy.deepcopy(template)
+    payload["structures"] = [item.strip() for item in (selected_structures or []) if isinstance(item, str) and item.strip()]
 
     if with_relax:
         payload["relaxation"] = copy.deepcopy(template.get("relaxation", {}))
@@ -439,14 +591,6 @@ def _build_param_payload(
             item["req_calc"] = True
             kept_properties.append(item)
     payload["properties"] = kept_properties
-
-    clean_elements = []
-    for ele in element_slots:
-        if not ele or not ele.strip():
-            continue
-        symbol = ele.strip()
-        if symbol not in clean_elements:
-            clean_elements.append(symbol)
 
     interaction_rows = interaction_rows or []
     potcar_map = _rows_to_mapping(
@@ -479,26 +623,17 @@ def _build_param_payload(
         else:
             interaction_payload.pop("model", None)
 
-        if clean_elements:
-            interaction_payload["type_map"] = {ele: idx for idx, ele in enumerate(clean_elements)}
-        elif (
-            isinstance(interaction_payload.get("type_map"), dict)
-            and interaction_payload["type_map"]
-            and effective_type == template_type
-        ):
-            pass
-        elif effective_type == "eam_alloy":
-            interaction_payload["type_map"] = {"Al": 0}
-        else:
-            interaction_payload.pop("type_map", None)
+        interaction_payload["type_map"] = "auto"
         interaction_payload.pop("incar", None)
         interaction_payload.pop("potcars", None)
         interaction_payload.pop("potcar_prefix", None)
     else:
         interaction_payload.pop("model", None)
         interaction_payload.pop("type_map", None)
+        path_key = _interaction_path_key(profile)
         if interaction_incar.strip():
-            interaction_payload["incar"] = interaction_incar.strip()
+            interaction_payload[path_key] = interaction_incar.strip()
+        interaction_payload.pop("incar" if path_key == "input" else "input", None)
         if potcar_map:
             interaction_payload["potcars"] = potcar_map
         elif "potcars" in interaction_payload and isinstance(interaction_payload.get("potcars"), dict):
@@ -518,6 +653,248 @@ def _build_param_payload(
     return payload
 
 
+def _normalize_workdir(workdir: str) -> str:
+    clean = (workdir or "").strip()
+    return os.path.abspath(clean or os.getcwd())
+
+
+def _resolve_file_path(workdir: str, filename: str) -> str:
+    clean = (filename or "").strip()
+    if not clean:
+        return ""
+    if os.path.isabs(clean):
+        return clean
+    return os.path.join(workdir, clean)
+
+
+def _list_workdir_file_options(workdir: str, current_value: str = "") -> List[Dict[str, str]]:
+    target_dir = _normalize_workdir(workdir)
+    options: List[Dict[str, str]] = []
+    seen = set()
+
+    if os.path.isdir(target_dir):
+        for root, dirnames, filenames in os.walk(target_dir):
+            dirnames[:] = sorted(name for name in dirnames if not name.startswith("."))
+            rel_root = os.path.relpath(root, target_dir)
+            for filename in sorted(filenames):
+                if filename.startswith("."):
+                    continue
+                rel_path = filename if rel_root == "." else os.path.join(rel_root, filename)
+                rel_path = rel_path.replace(os.path.sep, "/")
+                options.append({"label": rel_path, "value": rel_path})
+                seen.add(rel_path)
+
+    clean_current = (current_value or "").strip()
+    if clean_current and clean_current not in seen:
+        options.insert(0, {"label": f"{clean_current} (current)", "value": clean_current})
+    return options
+
+
+def _is_structure_candidate_dir(abs_dir: str) -> bool:
+    for marker in ("POSCAR", "CONTCAR", "STRU"):
+        if os.path.isfile(os.path.join(abs_dir, marker)):
+            return True
+    for marker in ("POSCAR", "CONTCAR", "STRU"):
+        if glob.glob(os.path.join(abs_dir, "conf_*", marker)):
+            return True
+    return False
+
+
+def _list_structure_path_options(workdir: str, current_values: Optional[List[str]] = None) -> List[Dict[str, str]]:
+    target_dir = _normalize_workdir(workdir)
+    options: List[Dict[str, str]] = []
+    seen = set()
+
+    if os.path.isdir(target_dir):
+        for root, dirnames, _filenames in os.walk(target_dir):
+            dirnames[:] = sorted(name for name in dirnames if not name.startswith("."))
+            rel_root = os.path.relpath(root, target_dir)
+            if rel_root == ".":
+                continue
+            rel_path = rel_root.replace(os.path.sep, "/")
+            if "." in rel_path:
+                continue
+            if _is_structure_candidate_dir(root):
+                options.append({"label": rel_path, "value": rel_path})
+                seen.add(rel_path)
+
+    for current in current_values or []:
+        clean_current = (current or "").strip()
+        if clean_current and clean_current not in seen:
+            options.insert(0, {"label": f"{clean_current} (current)", "value": clean_current})
+            seen.add(clean_current)
+    return options
+
+
+def _save_uploaded_files(contents: Any, filenames: Any, workdir: str, target_subdir: str = "confs") -> List[str]:
+    if not contents:
+        return []
+
+    if isinstance(contents, str):
+        content_items = [contents]
+    else:
+        content_items = list(contents)
+
+    if isinstance(filenames, str):
+        filename_items = [filenames]
+    else:
+        filename_items = list(filenames or [])
+
+    if len(filename_items) != len(content_items):
+        raise ValueError("Uploaded file metadata is incomplete.")
+
+    target_dir = _normalize_workdir(workdir)
+    if not os.path.isdir(target_dir):
+        raise FileNotFoundError(f"Workdir does not exist: {target_dir}")
+    upload_root = os.path.join(target_dir, target_subdir)
+    os.makedirs(upload_root, exist_ok=True)
+
+    saved_files: List[str] = []
+
+    def _safe_join_under(root_path: str, rel_unix_path: str) -> str:
+        normalized = rel_unix_path.replace("\\", "/")
+        path_parts = [part for part in normalized.split("/") if part and part != "."]
+        if not path_parts or any(part == ".." for part in path_parts):
+            raise ValueError(f"Unsafe path in uploaded archive: {rel_unix_path}")
+        candidate = os.path.join(root_path, *path_parts)
+        root_real = os.path.realpath(root_path)
+        candidate_real = os.path.realpath(candidate)
+        if os.path.commonpath([root_real, candidate_real]) != root_real:
+            raise ValueError(f"Unsafe path in uploaded archive: {rel_unix_path}")
+        return candidate
+
+    def _extract_archive(payload: bytes, raw_filename: str, upload_root_path: str) -> List[str]:
+        extracted_rel_paths: List[str] = []
+        lowered = raw_filename.lower()
+        if lowered.endswith(".zip"):
+            with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+                for info in zf.infolist():
+                    rel_name = info.filename.replace("\\", "/")
+                    if info.is_dir() or not rel_name.strip():
+                        continue
+                    target_path = _safe_join_under(upload_root_path, rel_name)
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    with zf.open(info, "r") as src, open(target_path, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    extracted_rel_paths.append(
+                        os.path.relpath(target_path, target_dir).replace(os.path.sep, "/")
+                    )
+            return extracted_rel_paths
+
+        if lowered.endswith(".tar") or lowered.endswith(".tar.gz") or lowered.endswith(".tgz"):
+            with tarfile.open(fileobj=io.BytesIO(payload), mode="r:*") as tf:
+                for member in tf.getmembers():
+                    rel_name = member.name.replace("\\", "/")
+                    if not member.isfile() or not rel_name.strip():
+                        continue
+                    target_path = _safe_join_under(upload_root_path, rel_name)
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    src = tf.extractfile(member)
+                    if src is None:
+                        continue
+                    with src, open(target_path, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    extracted_rel_paths.append(
+                        os.path.relpath(target_path, target_dir).replace(os.path.sep, "/")
+                    )
+            return extracted_rel_paths
+
+        return []
+
+    for raw_content, raw_name in zip(content_items, filename_items):
+        raw_filename = (raw_name or "").strip().replace("\\", "/")
+        path_parts = [part for part in raw_filename.split("/") if part]
+        if not path_parts:
+            raise ValueError("Uploaded filename is empty.")
+        if any(part in {".", ".."} for part in path_parts):
+            raise ValueError(f"Unsafe uploaded filename: {raw_name}")
+        rel_path = os.path.join(*path_parts)
+        filename = path_parts[-1]
+        if "," not in raw_content:
+            raise ValueError(f"Invalid upload payload for {filename}.")
+
+        _header, encoded = raw_content.split(",", 1)
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError(f"Invalid base64 payload for {filename}: {exc}") from exc
+
+        extracted = _extract_archive(payload, filename, upload_root)
+        if extracted:
+            saved_files.extend(extracted)
+            continue
+
+        target_path = os.path.join(upload_root, rel_path)
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        with open(target_path, "wb") as f:
+            f.write(payload)
+        saved_files.append(os.path.join(target_subdir, rel_path).replace(os.path.sep, "/"))
+
+    return saved_files
+
+
+def _read_latest_workflow_id(workdir: str) -> str:
+    log_path = os.path.join(workdir, ".workflow.log")
+    if not os.path.isfile(log_path):
+        return ""
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return ""
+    if not lines:
+        return ""
+    record = lines[-1].strip()
+    if not record:
+        return ""
+    return record.split("\t")[0].strip()
+
+
+def _summarize_step_progress(steps: List[Any]) -> Dict[str, int]:
+    total = 0
+    running = 0
+    finished = 0
+    for step in steps or []:
+        if isinstance(step, dict):
+            step_type = step.get("type")
+            phase = str(step.get("phase", ""))
+        else:
+            step_type = getattr(step, "type", "")
+            phase = str(getattr(step, "phase", ""))
+        if step_type == "StepGroup":
+            continue
+        total += 1
+        phase_norm = phase.lower()
+        if phase_norm in {"succeeded", "skipped", "omitted"}:
+            finished += 1
+        elif phase_norm in {"running", "pending"}:
+            running += 1
+    return {"total": total, "running": running, "finished": finished}
+
+
+def _query_workflow_progress(workflow_id: str, config_file: str) -> Tuple[Dict[str, int], str, str]:
+    try:
+        from dflow import Workflow
+    except Exception as exc:
+        raise RuntimeError(f"dflow is unavailable: {exc}") from exc
+
+    from apex.config import Config
+    from apex.utils import load_config_file
+
+    config_dict = load_config_file(config_file)
+    wf_config = Config(**config_dict)
+    Config.config_dflow(wf_config.dflow_config_dict)
+    Config.config_bohrium(wf_config.bohrium_config_dict)
+    Config.config_s3(wf_config.dflow_s3_config_dict)
+
+    wf = Workflow(id=workflow_id)
+    info = wf.query()
+    counts = _summarize_step_progress(info.get_step())
+    workflow_phase = str(getattr(getattr(info, "status", None), "phase", "Unknown"))
+    progress_text = str(getattr(getattr(info, "status", None), "progress", ""))
+    return counts, workflow_phase, progress_text
+
+
 def _build_submit_shell_command(param_file: str, global_file: str) -> Tuple[str, str]:
     apex_bin = shutil.which("apex")
     if apex_bin:
@@ -534,12 +911,12 @@ def _build_submit_shell_command(param_file: str, global_file: str) -> Tuple[str,
     return shell_cmd, display_cmd
 
 
-def _run_submit_in_background(param_file: str, global_file: str) -> Dict[str, Any]:
+def _run_submit_in_background(param_file: str, global_file: str, cwd: Optional[str] = None) -> Dict[str, Any]:
     shell_cmd, display_cmd = _build_submit_shell_command(param_file, global_file)
     try:
         completed = subprocess.run(
             ["bash", "-lc", shell_cmd],
-            cwd=os.getcwd(),
+            cwd=cwd or os.getcwd(),
             capture_output=True,
             text=True,
             check=False,
@@ -576,17 +953,21 @@ def _ensure_default_interaction_files(
     profile: str,
     param_payload: Dict[str, Any],
     incar_content: str = None,
+    workdir: Optional[str] = None,
 ) -> List[str]:
     created_paths: List[str] = []
     interaction = param_payload.get("interaction")
     if not isinstance(interaction, dict):
         return created_paths
 
-    incar_value = interaction.get("incar")
+    interaction_key = _interaction_path_key(profile)
+    incar_value = interaction.get(interaction_key) or interaction.get("incar")
     if isinstance(incar_value, str) and incar_value.strip():
         clean_incar = _strip_parenthetical_suffix(incar_value)
-        interaction["incar"] = clean_incar
-        target_path = os.path.join(os.getcwd(), clean_incar)
+        interaction[interaction_key] = clean_incar
+        if interaction_key == "input":
+            interaction.pop("incar", None)
+        target_path = os.path.join(_normalize_workdir(workdir or os.getcwd()), clean_incar)
         parent_dir = os.path.dirname(target_path)
         if parent_dir:
             os.makedirs(parent_dir, exist_ok=True)
@@ -630,16 +1011,136 @@ def _parse_submit_payloads(submit_global_editor: str, submit_param_editor: str) 
         return {}, {}, _build_feedback("global.json 必须是 JSON object")
     if not isinstance(param_payload, dict):
         return {}, {}, _build_feedback("param.json 必须是 JSON object")
+
+    try:
+        from apex.submit import validate_submit_paths
+
+        validate_submit_paths([param_payload])
+    except Exception as exc:
+        return {}, {}, _build_feedback(str(exc))
+
     return global_payload, param_payload, {}
 
 
-def _write_submit_json_files(global_payload: Dict[str, Any], param_payload: Dict[str, Any]) -> None:
-    with open("global.json", "w", encoding="utf-8") as f:
+def _write_submit_json_files(
+    global_payload: Dict[str, Any],
+    param_payload: Dict[str, Any],
+    workdir: str,
+    global_filename: str,
+    param_filename: str,
+) -> Tuple[str, str]:
+    global_path = _resolve_file_path(workdir, global_filename)
+    param_path = _resolve_file_path(workdir, param_filename)
+    if not global_path or not param_path:
+        raise RuntimeError("global/param filename cannot be empty")
+
+    global_parent = os.path.dirname(global_path)
+    param_parent = os.path.dirname(param_path)
+    if global_parent:
+        os.makedirs(global_parent, exist_ok=True)
+    if param_parent:
+        os.makedirs(param_parent, exist_ok=True)
+
+    with open(global_path, "w", encoding="utf-8") as f:
         json.dump(global_payload, f, indent=4, ensure_ascii=False)
         f.write("\n")
-    with open("param.json", "w", encoding="utf-8") as f:
+    with open(param_path, "w", encoding="utf-8") as f:
         json.dump(param_payload, f, indent=4, ensure_ascii=False)
         f.write("\n")
+    return global_path, param_path
+
+
+def _cleanup_reset_logs(workdir: str, filenames: Optional[List[str]] = None) -> List[str]:
+    target_dir = _normalize_workdir(workdir)
+    removed: List[str] = []
+    for name in filenames or ["dpdispatcher.log", ".workflow.log", "apex.log"]:
+        target_path = os.path.join(target_dir, name)
+        if os.path.isfile(target_path):
+            os.remove(target_path)
+            removed.append(name)
+    return removed
+
+
+def _run_report_in_background(config_file: str, report_target: str, cwd: str) -> Dict[str, Any]:
+    apex_bin = shutil.which("apex")
+    if apex_bin:
+        report_inner = (
+            f"{shlex.quote(apex_bin)} report --no-browser -c {shlex.quote(config_file)} -w {shlex.quote(report_target)}"
+        )
+        display_cmd = f"nohup apex report --no-browser -c {shlex.quote(config_file)} -w {shlex.quote(report_target)} > apex-report.log 2>&1 &"
+    else:
+        report_inner = (
+            f"{shlex.quote(sys.executable)} -m apex report --no-browser -c {shlex.quote(config_file)} -w {shlex.quote(report_target)}"
+        )
+        display_cmd = f"nohup {report_inner} > apex-report.log 2>&1 &"
+    shell_cmd = f"nohup {report_inner} > apex-report.log 2>&1 & echo $!"
+
+    try:
+        completed = subprocess.run(
+            ["bash", "-lc", shell_cmd],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "message": f"Failed to start background report: {exc}",
+            "command": display_cmd,
+            "returncode": "",
+            "stdout": "",
+            "stderr": str(exc),
+            "finished_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    pid = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
+    message = "Report app started in background (default Dash port, usually 8050)."
+    if pid:
+        message += f" PID: {pid}."
+    message += " Log file: apex-report.log"
+    return {
+        "ok": completed.returncode == 0,
+        "message": message if completed.returncode == 0 else "Background report failed to start.",
+        "command": display_cmd,
+        "returncode": str(completed.returncode),
+        "stdout": completed.stdout.strip(),
+        "stderr": completed.stderr.strip(),
+        "finished_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def _run_finalize_pipeline(workdir: str, workflow_id: str, global_file: str, param_file: str) -> Dict[str, Any]:
+    retrieve_feedback = _run_apex_command(
+        ["retrieve", "-i", workflow_id, "-w", workdir, "-c", global_file],
+        cwd=workdir,
+    )
+    if not retrieve_feedback.get("ok"):
+        retrieve_feedback["message"] = f"Retrieve failed. {retrieve_feedback.get('message', '')}".strip()
+        return retrieve_feedback
+
+    archive_feedback = _run_apex_command(
+        ["archive", param_file, "-c", global_file, "-w", workdir],
+        cwd=workdir,
+    )
+    if not archive_feedback.get("ok"):
+        archive_feedback["message"] = f"Archive failed. {archive_feedback.get('message', '')}".strip()
+        return archive_feedback
+
+    all_result_path = os.path.join(workdir, "all_result.json")
+    if not os.path.isfile(all_result_path):
+        return _build_feedback("Archive finished but all_result.json was not generated.")
+
+    report_feedback = _run_report_in_background(global_file, workdir, cwd=workdir)
+    if not report_feedback.get("ok"):
+        report_feedback["message"] = f"Report failed. {report_feedback.get('message', '')}".strip()
+        return report_feedback
+
+    report_feedback["message"] = (
+        f"Retrieve + archive + report completed. all_result.json: {all_result_path}. "
+        f"{report_feedback.get('message', '')}"
+    )
+    return report_feedback
 
 
 DEFAULT_GLOBAL_EDITOR_TEXT = _json_dump_text(_load_profile_global(DEFAULT_PROFILE))
@@ -648,11 +1149,11 @@ DEFAULT_INTERACTION_INCAR_CONTENT = _load_profile_incar_content(DEFAULT_PROFILE,
 DEFAULT_PARAM_EDITOR_TEXT = _json_dump_text(
     _build_param_payload(
         profile=DEFAULT_PROFILE,
+        selected_structures=DEFAULT_STRUCTURE_PATHS,
         with_relax="relaxation" in DEFAULT_PARAM_TEMPLATE,
         selected_properties=DEFAULT_SELECTED_PROPERTIES,
         interaction_type=DEFAULT_INTERACTION_TYPE,
         interaction_model=DEFAULT_INTERACTION_MODEL,
-        element_slots=DEFAULT_INTERACTION_ELEMENTS,
         interaction_incar=_extract_interaction_incar(DEFAULT_PARAM_TEMPLATE),
         interaction_rows=DEFAULT_INTERACTION_ROWS,
         base_template=DEFAULT_PARAM_TEMPLATE,
@@ -683,13 +1184,12 @@ class ApexGuiApp:
         return dbc.Tab(
             label="Submit",
             children=[
-                html.P("只保留提交相关配置：选择模板 + 填写 interaction + 勾选计算项。", className="text-muted"),
                 dbc.Row(
                     [
                         dbc.Col(
                             [
                                 html.H5("基础设置"),
-                                dbc.Label("计算后端模板 (global.json)"),
+                                dbc.Label("计算软件"),
                                 dcc.Dropdown(
                                     id="submit-profile",
                                     clearable=False,
@@ -719,12 +1219,17 @@ class ApexGuiApp:
                                     labelStyle={"display": "inline-block", "marginRight": "12px"},
                                 ),
                                 html.Br(),
-                                dbc.Label("interaction.type"),
-                                dcc.Dropdown(
-                                    id="submit-interaction-type",
-                                    clearable=False,
-                                    value=DEFAULT_INTERACTION_TYPE,
-                                    options=interaction_options,
+                                html.Div(
+                                    id="submit-interaction-type-block",
+                                    children=[
+                                        dbc.Label("interaction.type"),
+                                        dcc.Dropdown(
+                                            id="submit-interaction-type",
+                                            clearable=False,
+                                            value=DEFAULT_INTERACTION_TYPE,
+                                            options=interaction_options,
+                                        ),
+                                    ],
                                 ),
                                 html.Br(),
                                 html.Div(
@@ -732,57 +1237,15 @@ class ApexGuiApp:
                                     style={"display": "block"},
                                     children=[
                                         dbc.Label("interaction.model"),
-                                        dbc.Input(
+                                        dcc.Dropdown(
                                             id="submit-interaction-model",
+                                            options=_list_workdir_file_options(os.getcwd(), DEFAULT_INTERACTION_MODEL),
                                             value=DEFAULT_INTERACTION_MODEL,
-                                            placeholder="Al.eam.alloy",
+                                            placeholder="选择当前 Workdir 中的模型文件",
+                                            clearable=True,
+                                            searchable=True,
                                         ),
-                                        html.Br(),
-                                        dbc.Label("interaction.type_map 元素 (按顺序自动编号 0,1,2...)"),
-                                        dbc.Row(
-                                            [
-                                                dbc.Col(
-                                                    dbc.Input(
-                                                        id="submit-element-1",
-                                                        value=DEFAULT_INTERACTION_ELEMENTS[0] if len(DEFAULT_INTERACTION_ELEMENTS) > 0 else "",
-                                                        placeholder="Al",
-                                                    ),
-                                                    md=3,
-                                                ),
-                                                dbc.Col(
-                                                    dbc.Input(
-                                                        id="submit-element-2",
-                                                        value=DEFAULT_INTERACTION_ELEMENTS[1] if len(DEFAULT_INTERACTION_ELEMENTS) > 1 else "",
-                                                        placeholder="",
-                                                    ),
-                                                    md=3,
-                                                ),
-                                                dbc.Col(
-                                                    dbc.Input(
-                                                        id="submit-element-3",
-                                                        value=DEFAULT_INTERACTION_ELEMENTS[2] if len(DEFAULT_INTERACTION_ELEMENTS) > 2 else "",
-                                                        placeholder="",
-                                                    ),
-                                                    md=3,
-                                                ),
-                                                dbc.Col(
-                                                    dbc.Input(
-                                                        id="submit-element-4",
-                                                        value=DEFAULT_INTERACTION_ELEMENTS[3] if len(DEFAULT_INTERACTION_ELEMENTS) > 3 else "",
-                                                        placeholder="",
-                                                    ),
-                                                    md=3,
-                                                ),
-                                            ],
-                                            className="g-2",
-                                        ),
-                                        html.Br(),
-                                        dbc.Label("更多元素（预留接口，逗号/空格分隔）"),
-                                        dbc.Input(
-                                            id="submit-element-extra",
-                                            value=", ".join(DEFAULT_INTERACTION_ELEMENTS[4:]),
-                                            placeholder="例如: Cu, Ni, Fe, Cr",
-                                        ),
+                                        html.Small("从当前 Workdir 选择模型文件。上传后列表会自动刷新。", className="text-muted"),
                                     ],
                                 ),
                                 html.Div(
@@ -813,15 +1276,117 @@ class ApexGuiApp:
                                             data=DEFAULT_INTERACTION_ROWS,
                                             editable=True,
                                             row_deletable=True,
+                                            style_data_conditional=[
+                                                {
+                                                    "if": {"filter_query": f'{{potcar}} = "{MISSING_POTCAR_HINT}"', "column_id": "potcar"},
+                                                    "color": "#7a7a7a",
+                                                },
+                                                {
+                                                    "if": {"filter_query": f'{{orb_file}} = "{MISSING_ORB_HINT}"', "column_id": "orb_file"},
+                                                    "color": "#7a7a7a",
+                                                },
+                                            ],
                                             style_table={"overflowX": "auto"},
                                             style_cell={"textAlign": "left", "padding": "6px"},
                                         ),
                                     ],
                                 ),
                                 html.Br(),
+                                dbc.Label("工作目录 (Workdir)"),
+                                dbc.Input(
+                                    id="submit-workdir",
+                                    value=os.getcwd(),
+                                    placeholder="/path/to/workdir",
+                                ),
+                                html.Br(),
+                                dbc.Label("structures"),
+                                dcc.Dropdown(
+                                    id="submit-structures",
+                                    options=_list_structure_path_options(os.getcwd(), DEFAULT_STRUCTURE_PATHS),
+                                    value=DEFAULT_STRUCTURE_PATHS,
+                                    placeholder="选择结构目录",
+                                    multi=True,
+                                    searchable=True,
+                                ),
+                                html.Small("从当前 Workdir 选择结构目录, 请注意不要选择文件", className="text-muted"),
+                                html.Br(),
+                                dbc.Label("上传结构"),
+                                dcc.Upload(
+                                    id="submit-structure-upload",
+                                    multiple=True,
+                                    children=html.Div(
+                                        [
+                                            "拖拽结构文件/文件夹到这里，或 ",
+                                            html.A("点击选择文件"),
+                                        ]
+                                    ),
+                                    style={
+                                        "width": "100%",
+                                        "minHeight": "72px",
+                                        "lineHeight": "72px",
+                                        "borderWidth": "1px",
+                                        "borderStyle": "dashed",
+                                        "borderRadius": "6px",
+                                        "textAlign": "center",
+                                        "backgroundColor": "#fafafa",
+                                    },
+                                ),
+                                html.Small(
+                                    "结构文件会上传到当前 Workdir 下的 confs/；支持目录拖拽，或上传 zip/tar(.gz/.tgz) 自动解压。",
+                                    className="text-muted",
+                                ),
+                                html.Br(),
+                                dbc.Label("上传文件"),
+                                dcc.Upload(
+                                    id="submit-file-upload",
+                                    multiple=True,
+                                    children=html.Div(
+                                        [
+                                            "拖拽文件/文件夹到这里，或 ",
+                                            html.A("点击选择文件"),
+                                        ]
+                                    ),
+                                    style={
+                                        "width": "100%",
+                                        "minHeight": "72px",
+                                        "lineHeight": "72px",
+                                        "borderWidth": "1px",
+                                        "borderStyle": "dashed",
+                                        "borderRadius": "6px",
+                                        "textAlign": "center",
+                                        "backgroundColor": "#fafafa",
+                                    },
+                                ),
+                                html.Small(
+                                    "普通文件会上传到当前 Working Directory；支持目录拖拽，或上传 zip/tar(.gz/.tgz) 自动解压。",
+                                    className="text-muted",
+                                ),
+                                html.Br(),
+                                dbc.Label("提交参数文件名"),
+                                dbc.Input(
+                                    id="submit-param-file",
+                                    value="param.json",
+                                    placeholder="param.json",
+                                ),
+                                html.Br(),
+                                dbc.Label("全局配置文件名"),
+                                dbc.Input(
+                                    id="submit-global-file",
+                                    value="global.json",
+                                    placeholder="global.json",
+                                ),
+                                html.Br(),
+                                dbc.Label("Workflow ID (留空时自动从 .workflow.log 读取)"),
+                                dbc.Input(
+                                    id="submit-workflow-id",
+                                    value="",
+                                    placeholder="例如: wf-xxxx",
+                                ),
+                                html.Br(),
                                 dbc.Button("Reset", id="submit-reset", color="secondary", className="me-2"),
                                 dbc.Button("Apply", id="submit-apply", color="secondary", className="me-2"),
-                                dbc.Button("Submit", id="submit-run", color="primary"),
+                                dbc.Button("Submit", id="submit-run", color="primary", className="me-2"),
+                                dbc.Button("Retrieve + Archive + Report", id="submit-finalize", color="success"),
                             ],
                             md=5,
                         ),
@@ -839,11 +1404,11 @@ class ApexGuiApp:
                                     style={"display": "none"},
                                     children=[
                                         html.Br(),
-                                        dbc.Label("interaction.incar (会自动去掉括号备注)"),
+                                        dbc.Label(id="submit-interaction-path-label", children=_interaction_path_label(DEFAULT_PROFILE)),
                                         dbc.Input(
                                             id="submit-interaction-incar",
-                                            value=_extract_interaction_incar(DEFAULT_PARAM_TEMPLATE),
-                                            placeholder="vasp_input/INCAR",
+                                            value=_extract_interaction_incar(DEFAULT_PARAM_TEMPLATE, DEFAULT_PROFILE),
+                                            placeholder=_interaction_path_placeholder(DEFAULT_PROFILE),
                                         ),
                                         html.Br(),
                                         dbc.Label(id="submit-incar-editor-title", children=_interaction_editor_label(DEFAULT_PROFILE)),
@@ -868,6 +1433,21 @@ class ApexGuiApp:
                     className="g-3",
                 ),
                 html.Br(),
+                dbc.Row(
+                    [
+                        dbc.Col(
+                            [
+                                html.H6("Workflow 进度"),
+                                dbc.Progress(id="submit-progress-bar", value=0, max=100, striped=True, animated=True),
+                                html.Div(id="submit-progress-text", className="mt-2 text-muted"),
+                                html.Div(id="submit-progress-stats", className="text-muted"),
+                                dcc.Interval(id="submit-progress-interval", interval=5000, n_intervals=0),
+                            ],
+                            md=12,
+                        )
+                    ]
+                ),
+                html.Br(),
                 dbc.Label("运行命令 (Run submit 后后台执行)"),
                 html.Pre(
                     id="submit-command-preview",
@@ -880,9 +1460,8 @@ class ApexGuiApp:
     @staticmethod
     def _build_manage_tab() -> dbc.Tab:
         return dbc.Tab(
-            label="Manage",
+            label="Log",
             children=[
-                html.P("Manage 仅保留 apex.log 查看。", className="text-muted"),
                 dbc.Row(
                     [
                         dbc.Col(
@@ -1006,11 +1585,8 @@ class ApexGuiApp:
         return dbc.Container(
             [
                 html.H2("APEX Graphical Interface", className="mt-3"),
-                html.P(
-                    "Submit 页已简化为 param.json/global.json 生成与后台提交。",
-                    className="text-muted",
-                ),
                 dcc.Store(id="command-result"),
+                dcc.Store(id="submit-state", data=DEFAULT_SUBMIT_STATE),
                 dcc.ConfirmDialog(id="submit-confirm-dialog"),
                 dbc.Tabs(
                     [
@@ -1046,20 +1622,17 @@ class ApexGuiApp:
             Output("submit-relax-check", "value"),
             Output("submit-properties-check", "options"),
             Output("submit-properties-check", "value"),
+            Output("submit-interaction-type-block", "style"),
             Output("submit-interaction-type", "options"),
             Output("submit-interaction-type", "value"),
             Output("submit-lammps-interaction-block", "style"),
             Output("submit-electronic-interaction-block", "style"),
             Output("submit-incar-right-block", "style"),
-            Output("submit-interaction-model", "value"),
+            Output("submit-interaction-path-label", "children"),
+            Output("submit-interaction-incar", "placeholder"),
             Output("submit-interaction-incar", "value"),
             Output("submit-incar-editor-title", "children"),
             Output("submit-incar-content", "value"),
-            Output("submit-element-1", "value"),
-            Output("submit-element-2", "value"),
-            Output("submit-element-3", "value"),
-            Output("submit-element-4", "value"),
-            Output("submit-element-extra", "value"),
             Output("submit-interaction-table", "columns"),
             Input("submit-profile", "value"),
         )
@@ -1067,13 +1640,14 @@ class ApexGuiApp:
             param_template = _load_profile_param_template(profile)
             prop_types = _extract_property_types(param_template)
             prop_selected = _extract_selected_properties(param_template)
-            interaction_type, interaction_model, interaction_elements = _extract_interaction_defaults(param_template)
+            interaction_type, _interaction_model, _interaction_elements = _extract_interaction_defaults(param_template)
             interaction_incar = _extract_interaction_incar(param_template)
             interaction_incar_content = _load_profile_incar_content(profile, param_template)
             global_payload = _load_profile_global(profile)
             prop_options = [{"label": name, "value": name} for name in prop_types]
             interaction_options = _interaction_type_options_for_profile(profile, interaction_type)
             relax_value = ["relax"] if "relaxation" in param_template else []
+            interaction_type_style = {"display": "block"} if profile == "lammps" else {"display": "none"}
             lammps_style = {"display": "block"} if profile == "lammps" else {"display": "none"}
             electronic_style = {"display": "none"} if profile == "lammps" else {"display": "block"}
             table_columns = _interaction_table_columns_for_profile(profile)
@@ -1083,37 +1657,45 @@ class ApexGuiApp:
                 relax_value,
                 prop_options,
                 prop_selected,
+                interaction_type_style,
                 interaction_options,
                 interaction_type,
                 lammps_style,
                 electronic_style,
                 electronic_style,
-                interaction_model,
-                interaction_incar,
+                _interaction_path_label(profile),
+                _interaction_path_placeholder(profile),
+                _extract_interaction_incar(param_template, profile),
                 _interaction_editor_label(profile),
                 interaction_incar_content,
-                interaction_elements[0] if len(interaction_elements) > 0 else "",
-                interaction_elements[1] if len(interaction_elements) > 1 else "",
-                interaction_elements[2] if len(interaction_elements) > 2 else "",
-                interaction_elements[3] if len(interaction_elements) > 3 else "",
-                ", ".join(interaction_elements[4:]),
                 table_columns,
             )
 
         @self.app.callback(
             Output("submit-interaction-table", "data"),
             Input("submit-profile", "value"),
+            Input("submit-workdir", "value"),
+            Input("submit-structures", "value"),
+            Input("command-result", "data"),
             Input("submit-row-add", "n_clicks"),
             Input("submit-row-del", "n_clicks"),
             State("submit-interaction-table", "data"),
             State("submit-interaction-table", "columns"),
             prevent_initial_call=True,
         )
-        def _update_interaction_table(profile, _add_clicks, _del_clicks, current_data, columns):
+        def _update_interaction_table(profile, submit_workdir, structures_value, _command_result, _add_clicks, _del_clicks, current_data, columns):
             triggered_id = _resolve_triggered_id()
+            profile = profile if profile in PROFILE_NAMES else DEFAULT_PROFILE
 
-            if triggered_id == "submit-profile":
+            if triggered_id in {"submit-profile", "submit-workdir", "submit-structures", "command-result"}:
                 template = _load_profile_param_template(profile)
+                if profile in {"vasp", "abacus"}:
+                    return _autodetect_interaction_rows(
+                        profile,
+                        submit_workdir or os.getcwd(),
+                        structures_value or _extract_structure_defaults(template),
+                        template,
+                    )
                 return _interaction_table_rows_from_template(profile, template)
 
             rows = copy.deepcopy(current_data or [])
@@ -1132,21 +1714,53 @@ class ApexGuiApp:
             return rows
 
         @self.app.callback(
+            Output("submit-structures", "options"),
+            Output("submit-structures", "value"),
+            Input("submit-workdir", "value"),
+            Input("command-result", "data"),
+            Input("submit-profile", "value"),
+            State("submit-structures", "value"),
+            prevent_initial_call=False,
+        )
+        def _refresh_structure_options(submit_workdir, _command_result, submit_profile, current_structures):
+            triggered_id = _resolve_triggered_id()
+            workdir = _normalize_workdir(submit_workdir)
+            template = _load_profile_param_template(submit_profile if submit_profile in PROFILE_NAMES else DEFAULT_PROFILE)
+            template_structures = _extract_structure_defaults(template)
+            current_value = template_structures if triggered_id == "submit-profile" else (current_structures or template_structures)
+            options = _list_structure_path_options(workdir, current_value)
+            return options, current_value
+
+        @self.app.callback(
+            Output("submit-interaction-model", "options"),
+            Output("submit-interaction-model", "value"),
+            Input("submit-workdir", "value"),
+            Input("command-result", "data"),
+            Input("submit-profile", "value"),
+            State("submit-interaction-model", "value"),
+            prevent_initial_call=False,
+        )
+        def _refresh_interaction_model_options(submit_workdir, _command_result, submit_profile, current_model):
+            triggered_id = _resolve_triggered_id()
+            workdir = _normalize_workdir(submit_workdir)
+            template = _load_profile_param_template(submit_profile if submit_profile in PROFILE_NAMES else DEFAULT_PROFILE)
+            _interaction_type, template_model, _interaction_elements = _extract_interaction_defaults(template)
+            current_value = template_model if triggered_id == "submit-profile" else (current_model or template_model)
+            options = _list_workdir_file_options(workdir, current_value)
+            return options, current_value
+
+        @self.app.callback(
             Output("submit-param-editor", "value"),
             Input("submit-profile", "value"),
             Input("submit-reset", "n_clicks"),
             Input("submit-relax-check", "value"),
             Input("submit-properties-check", "value"),
+            Input("submit-structures", "value"),
+            Input("submit-interaction-table", "data"),
             State("submit-profile", "value"),
             State("submit-interaction-type", "value"),
             State("submit-interaction-model", "value"),
             State("submit-interaction-incar", "value"),
-            State("submit-element-1", "value"),
-            State("submit-element-2", "value"),
-            State("submit-element-3", "value"),
-            State("submit-element-4", "value"),
-            State("submit-element-extra", "value"),
-            State("submit-interaction-table", "data"),
             prevent_initial_call=True,
         )
         def _generate_param_editor(
@@ -1154,23 +1768,20 @@ class ApexGuiApp:
             _reset_clicks,
             relax_check,
             properties_check,
+            structures_value,
+            interaction_table_rows,
             profile_state,
             interaction_type,
             interaction_model,
             interaction_incar,
-            ele1,
-            ele2,
-            ele3,
-            ele4,
-            ele_extra,
-            interaction_table_rows,
         ):
             triggered_id = _resolve_triggered_id()
             profile = profile_state or profile_input or DEFAULT_PROFILE
             param_template = _load_profile_param_template(profile)
 
             if triggered_id in {"submit-profile", "submit-reset", "submit-relax-check", "submit-properties-check"}:
-                init_interaction_type, init_interaction_model, init_elements = _extract_interaction_defaults(param_template)
+                init_interaction_type, init_interaction_model, _init_elements = _extract_interaction_defaults(param_template)
+                init_structures = _extract_structure_defaults(param_template)
                 selected_props = (
                     _extract_selected_properties(param_template)
                     if triggered_id == "submit-profile"
@@ -1182,52 +1793,39 @@ class ApexGuiApp:
                     else ("relax" in (relax_check or []))
                 )
                 if triggered_id == "submit-profile":
+                    next_structures = init_structures
                     next_interaction_type = init_interaction_type
                     next_interaction_model = init_interaction_model
-                    next_elements = init_elements
                     next_interaction_incar = _extract_interaction_incar(param_template)
                     next_interaction_rows = _interaction_table_rows_from_template(profile, param_template)
                 else:
+                    next_structures = structures_value or init_structures
                     next_interaction_type = interaction_type or init_interaction_type
                     next_interaction_model = interaction_model or init_interaction_model
-                    next_elements = [
-                        ele1 or "",
-                        ele2 or "",
-                        ele3 or "",
-                        ele4 or "",
-                        *_parse_extra_elements(ele_extra or ""),
-                    ]
                     next_interaction_incar = interaction_incar or _extract_interaction_incar(param_template)
                     next_interaction_rows = interaction_table_rows or _interaction_table_rows_from_template(
                         profile, param_template
                     )
                 payload = _build_param_payload(
                     profile=profile,
+                    selected_structures=next_structures,
                     with_relax=enable_relax,
                     selected_properties=selected_props,
                     interaction_type=next_interaction_type,
                     interaction_model=next_interaction_model,
-                    element_slots=next_elements,
                     interaction_incar=next_interaction_incar,
                     interaction_rows=next_interaction_rows,
                     base_template=param_template,
                 )
                 return _json_dump_text(payload)
 
-            all_elements = [
-                ele1 or "",
-                ele2 or "",
-                ele3 or "",
-                ele4 or "",
-                *_parse_extra_elements(ele_extra or ""),
-            ]
             payload = _build_param_payload(
                 profile=profile,
+                selected_structures=structures_value or [],
                 with_relax="relax" in (relax_check or []),
                 selected_properties=properties_check or [],
                 interaction_type=interaction_type or "eam_alloy",
                 interaction_model=interaction_model or "",
-                element_slots=all_elements,
                 interaction_incar=interaction_incar or "",
                 interaction_rows=interaction_table_rows or [],
                 base_template=param_template,
@@ -1238,31 +1836,77 @@ class ApexGuiApp:
             Output("command-result", "data"),
             Output("submit-confirm-dialog", "displayed"),
             Output("submit-confirm-dialog", "message"),
+            Output("submit-state", "data"),
+            Output("submit-workflow-id", "value"),
+            Input("submit-reset", "n_clicks"),
             Input("submit-apply", "n_clicks"),
             Input("submit-run", "n_clicks"),
+            Input("submit-finalize", "n_clicks"),
             Input("submit-confirm-dialog", "submit_n_clicks"),
             Input("advanced-run", "n_clicks"),
             State("submit-profile", "value"),
             State("submit-global-editor", "value"),
             State("submit-param-editor", "value"),
             State("submit-incar-content", "value"),
+            State("submit-workdir", "value"),
+            State("submit-global-file", "value"),
+            State("submit-param-file", "value"),
+            State("submit-workflow-id", "value"),
+            State("submit-state", "data"),
             State("advanced-command", "value"),
             prevent_initial_call=True,
         )
         def _handle_command(
+            _reset_clicks,
             _apply_clicks,
             _submit_clicks,
+            _finalize_clicks,
             _submit_confirm_clicks,
             _advanced_clicks,
             submit_profile,
             submit_global_editor,
             submit_param_editor,
             submit_incar_content,
+            submit_workdir,
+            submit_global_file,
+            submit_param_file,
+            submit_workflow_id,
+            submit_state,
             advanced_command,
         ):
             triggered_id = _resolve_triggered_id()
             default_confirm_message = "检测到已存在 apex.log，是否确认重新提交？"
             profile = submit_profile if submit_profile in PROFILE_NAMES else DEFAULT_PROFILE
+            workdir = _normalize_workdir(submit_workdir)
+            global_file = (submit_global_file or "global.json").strip()
+            param_file = (submit_param_file or "param.json").strip()
+            current_workflow_id = (submit_workflow_id or "").strip()
+
+            state_payload = copy.deepcopy(submit_state) if isinstance(submit_state, dict) else copy.deepcopy(DEFAULT_SUBMIT_STATE)
+            state_payload.update(
+                {
+                    "workdir": workdir,
+                    "global_file": global_file,
+                    "param_file": param_file,
+                }
+            )
+
+            if not os.path.isdir(workdir):
+                feedback = _build_feedback(f"Workdir does not exist: {workdir}")
+                return feedback, False, default_confirm_message, state_payload, current_workflow_id
+
+            if not global_file or not param_file:
+                feedback = _build_feedback("global/param 文件名不能为空")
+                return feedback, False, default_confirm_message, state_payload, current_workflow_id
+
+            if triggered_id == "submit-reset":
+                removed_logs = _cleanup_reset_logs(workdir)
+                state_payload["workflow_id"] = ""
+                if removed_logs:
+                    message = f"Reset completed. Removed files in {workdir}: " + ", ".join(removed_logs)
+                else:
+                    message = f"Reset completed. No log files removed in {workdir}."
+                return _build_feedback(message=message, ok=True), False, default_confirm_message, state_payload, ""
 
             if triggered_id in {"submit-apply", "submit-run", "submit-confirm-dialog"}:
                 global_payload, param_payload, parse_feedback = _parse_submit_payloads(
@@ -1270,53 +1914,75 @@ class ApexGuiApp:
                     submit_param_editor,
                 )
                 if parse_feedback:
-                    return parse_feedback, False, default_confirm_message
+                    return parse_feedback, False, default_confirm_message, state_payload, current_workflow_id
 
                 created_files = _ensure_default_interaction_files(
                     profile,
                     param_payload,
                     incar_content=submit_incar_content,
+                    workdir=workdir,
                 )
-                _write_submit_json_files(global_payload, param_payload)
+                _write_submit_json_files(global_payload, param_payload, workdir, global_file, param_file)
 
                 if triggered_id == "submit-apply":
-                    message = "Applied: saved global.json and param.json."
+                    message = f"Applied: saved {global_file} and {param_file} in {workdir}."
                     if created_files:
                         message += " Saved interaction files: " + ", ".join(created_files)
-                    return _build_feedback(message=message, ok=True), False, default_confirm_message
+                    return _build_feedback(message=message, ok=True), False, default_confirm_message, state_payload, current_workflow_id
 
             if triggered_id == "submit-run":
-                if os.path.exists("apex.log"):
+                if os.path.exists(os.path.join(workdir, "apex.log")):
                     warning = _build_feedback(
                         "Detected existing apex.log. Please confirm resubmission.",
                         ok=False,
                     )
-                    return warning, True, default_confirm_message
+                    return warning, True, default_confirm_message, state_payload, current_workflow_id
 
-                run_feedback = _run_submit_in_background("param.json", "global.json")
+                run_feedback = _run_submit_in_background(param_file, global_file, cwd=workdir)
                 if created_files:
                     extra_line = " Auto-created default files: " + ", ".join(created_files)
                     run_feedback["message"] = f"{run_feedback.get('message', '').rstrip()}{extra_line}"
-                return run_feedback, False, default_confirm_message
+                latest_workflow_id = _read_latest_workflow_id(workdir)
+                if latest_workflow_id:
+                    state_payload["workflow_id"] = latest_workflow_id
+                return run_feedback, False, default_confirm_message, state_payload, latest_workflow_id or current_workflow_id
 
             if triggered_id == "submit-confirm-dialog":
-                run_feedback = _run_submit_in_background("param.json", "global.json")
+                run_feedback = _run_submit_in_background(param_file, global_file, cwd=workdir)
                 if created_files:
                     extra_line = " Auto-created default files: " + ", ".join(created_files)
                     run_feedback["message"] = f"{run_feedback.get('message', '').rstrip()}{extra_line}"
-                return run_feedback, False, default_confirm_message
+                latest_workflow_id = _read_latest_workflow_id(workdir)
+                if latest_workflow_id:
+                    state_payload["workflow_id"] = latest_workflow_id
+                return run_feedback, False, default_confirm_message, state_payload, latest_workflow_id or current_workflow_id
+
+            if triggered_id == "submit-finalize":
+                workflow_id = current_workflow_id or state_payload.get("workflow_id", "") or _read_latest_workflow_id(workdir)
+                if not workflow_id:
+                    feedback = _build_feedback("Workflow ID is required for retrieve/archive/report. Fill it or submit first.")
+                    return feedback, False, default_confirm_message, state_payload, ""
+
+                final_feedback = _run_finalize_pipeline(
+                    workdir=workdir,
+                    workflow_id=workflow_id,
+                    global_file=global_file,
+                    param_file=param_file,
+                )
+                state_payload["workflow_id"] = workflow_id
+                return final_feedback, False, default_confirm_message, state_payload, workflow_id
 
             if triggered_id == "advanced-run":
                 if not advanced_command or not advanced_command.strip():
-                    return _build_feedback("Please provide a command tail."), False, default_confirm_message
+                    return _build_feedback("Please provide a command tail."), False, default_confirm_message, state_payload, current_workflow_id
                 try:
                     advanced_args = shlex.split(advanced_command.strip())
                 except ValueError as exc:
-                    return _build_feedback(f"Command parse error: {exc}"), False, default_confirm_message
+                    return _build_feedback(f"Command parse error: {exc}"), False, default_confirm_message, state_payload, current_workflow_id
                 if advanced_args and advanced_args[0] == "apex":
                     advanced_args = advanced_args[1:]
                 if not advanced_args:
-                    return _build_feedback("Please provide arguments after `apex`."), False, default_confirm_message
+                    return _build_feedback("Please provide arguments after `apex`."), False, default_confirm_message, state_payload, current_workflow_id
                 if advanced_args[0] in BLOCKED_INLINE_COMMANDS:
                     return (
                         _build_feedback(
@@ -1324,10 +1990,83 @@ class ApexGuiApp:
                         ),
                         False,
                         default_confirm_message,
+                        state_payload,
+                        current_workflow_id,
                     )
-                return _run_apex_command(advanced_args), False, default_confirm_message
+                return _run_apex_command(advanced_args, cwd=workdir), False, default_confirm_message, state_payload, current_workflow_id
 
-            return _build_feedback("No action detected."), False, default_confirm_message
+            return _build_feedback("No action detected."), False, default_confirm_message, state_payload, current_workflow_id
+
+        @self.app.callback(
+            Output("submit-progress-bar", "value"),
+            Output("submit-progress-bar", "label"),
+            Output("submit-progress-text", "children"),
+            Output("submit-progress-stats", "children"),
+            Output("submit-state", "data", allow_duplicate=True),
+            Output("submit-workflow-id", "value", allow_duplicate=True),
+            Input("submit-progress-interval", "n_intervals"),
+            Input("command-result", "data"),
+            State("submit-state", "data"),
+            State("submit-workdir", "value"),
+            State("submit-global-file", "value"),
+            State("submit-workflow-id", "value"),
+            prevent_initial_call=True,
+        )
+        def _refresh_submit_progress(
+            _n_intervals,
+            _command_result,
+            submit_state,
+            submit_workdir,
+            submit_global_file,
+            submit_workflow_id,
+        ):
+            state_payload = copy.deepcopy(submit_state) if isinstance(submit_state, dict) else copy.deepcopy(DEFAULT_SUBMIT_STATE)
+            workdir = _normalize_workdir(submit_workdir or state_payload.get("workdir") or os.getcwd())
+            state_payload["workdir"] = workdir
+            global_file = (submit_global_file or state_payload.get("global_file") or "global.json").strip()
+            state_payload["global_file"] = global_file
+
+            workflow_id = (submit_workflow_id or "").strip() or state_payload.get("workflow_id", "")
+            if not workflow_id:
+                workflow_id = _read_latest_workflow_id(workdir)
+            if workflow_id:
+                state_payload["workflow_id"] = workflow_id
+
+            if not workflow_id:
+                return 0, "0%", "暂无 workflow id（提交后会自动识别）", "Total: 0 | Running: 0 | Finished: 0", state_payload, ""
+
+            config_path = _resolve_file_path(workdir, global_file)
+            if not os.path.isfile(config_path):
+                return (
+                    0,
+                    "0%",
+                    f"缺少配置文件: {config_path}",
+                    "Total: 0 | Running: 0 | Finished: 0",
+                    state_payload,
+                    workflow_id,
+                )
+
+            try:
+                counts, workflow_phase, raw_progress = _query_workflow_progress(workflow_id, config_path)
+            except Exception as exc:
+                return (
+                    0,
+                    "0%",
+                    f"无法查询 workflow 进度: {exc}",
+                    "Total: 0 | Running: 0 | Finished: 0",
+                    state_payload,
+                    workflow_id,
+                )
+
+            total = counts.get("total", 0)
+            finished = counts.get("finished", 0)
+            running = counts.get("running", 0)
+            percent = int(round((finished / total) * 100)) if total > 0 else 0
+            phase_text = f"Workflow {workflow_id} | Phase: {workflow_phase}"
+            if raw_progress:
+                phase_text += f" | Raw: {raw_progress}"
+            stats = f"Total: {total} | Running: {running} | Finished: {finished}"
+            return percent, f"{percent}%", phase_text, stats, state_payload, workflow_id
 
         @self.app.callback(
             Output("account-email", "value"),
@@ -1366,12 +2105,57 @@ class ApexGuiApp:
             return _format_feedback(payload)
 
         @self.app.callback(
+            Output("command-result", "data", allow_duplicate=True),
+            Input("submit-structure-upload", "contents"),
+            State("submit-structure-upload", "filename"),
+            State("submit-workdir", "value"),
+            prevent_initial_call=True,
+        )
+        def _handle_structure_upload(upload_contents, upload_filenames, submit_workdir):
+            workdir = _normalize_workdir(submit_workdir)
+            try:
+                saved_files = _save_uploaded_files(upload_contents, upload_filenames, workdir, target_subdir="confs")
+            except Exception as exc:
+                return _build_feedback(f"Structure upload failed: {exc}")
+
+            if not saved_files:
+                return _build_feedback("No uploaded structure files received.")
+
+            return _build_feedback(
+                f"Uploaded {len(saved_files)} structure file(s) to {os.path.join(workdir, 'confs')}: " + ", ".join(saved_files),
+                ok=True,
+            )
+
+        @self.app.callback(
+            Output("command-result", "data", allow_duplicate=True),
+            Input("submit-file-upload", "contents"),
+            State("submit-file-upload", "filename"),
+            State("submit-workdir", "value"),
+            prevent_initial_call=True,
+        )
+        def _handle_file_upload(upload_contents, upload_filenames, submit_workdir):
+            workdir = _normalize_workdir(submit_workdir)
+            try:
+                saved_files = _save_uploaded_files(upload_contents, upload_filenames, workdir, target_subdir="")
+            except Exception as exc:
+                return _build_feedback(f"File upload failed: {exc}")
+
+            if not saved_files:
+                return _build_feedback("No uploaded files received.")
+
+            return _build_feedback(
+                f"Uploaded {len(saved_files)} file(s) to {workdir}: " + ", ".join(saved_files),
+                ok=True,
+            )
+
+        @self.app.callback(
             Output("manage-log-content", "children"),
             Input("manage-log-refresh", "n_clicks"),
             Input("manage-log-interval", "n_intervals"),
+            State("submit-workdir", "value"),
         )
-        def _update_manage_log(_clicks, _n_intervals):
-            return _read_log_tail()
+        def _update_manage_log(_clicks, _n_intervals, submit_workdir):
+            return _read_log_tail(workdir=submit_workdir)
 
     def run(self) -> None:
         host_for_browser = "127.0.0.1" if self.host in {"0.0.0.0", "::"} else self.host

@@ -1,23 +1,34 @@
+import base64
+import io
 import json
 import os
 import tempfile
 import unittest
+import zipfile
 
 from apex.gui import (
+    _autodetect_interaction_rows,
     _build_param_payload,
+    _cleanup_reset_logs,
     _ensure_default_interaction_files,
     _extract_property_types,
     _extract_potcar_rows,
+    _parse_extra_elements,
     _interaction_editor_label,
     _interaction_table_columns_for_profile,
     _interaction_table_rows_from_template,
     _interaction_type_options_for_profile,
+    _list_structure_path_options,
+    _list_workdir_file_options,
     _load_account_state,
     _load_profile_param_template,
-    _parse_extra_elements,
+    _parse_submit_payloads,
+    _read_latest_workflow_id,
     _render_account_summary,
+    _save_uploaded_files,
     _save_account_overwrite,
     _strip_parenthetical_suffix,
+    _summarize_step_progress,
 )
 
 
@@ -25,6 +36,7 @@ class TestGuiSubmitBuilder(unittest.TestCase):
     def test_build_param_payload_sets_interaction_and_req_calc(self):
         payload = _build_param_payload(
             profile="lammps",
+            selected_structures=["confs/std-fcc"],
             with_relax=False,
             selected_properties=["elastic", "eos"],
             interaction_type="eam_alloy",
@@ -33,9 +45,10 @@ class TestGuiSubmitBuilder(unittest.TestCase):
         )
 
         self.assertNotIn("relaxation", payload)
+        self.assertEqual(payload["structures"], ["confs/std-fcc"])
         self.assertEqual(payload["interaction"]["type"], "eam_alloy")
         self.assertEqual(payload["interaction"]["model"], "my_model.eam")
-        self.assertEqual(payload["interaction"]["type_map"], {"Al": 0, "Ni": 1})
+        self.assertEqual(payload["interaction"]["type_map"], "auto")
 
         req_calc = {
             item["type"]: item.get("req_calc")
@@ -50,6 +63,7 @@ class TestGuiSubmitBuilder(unittest.TestCase):
     def test_build_param_payload_default_element_and_model(self):
         payload = _build_param_payload(
             profile="lammps",
+            selected_structures=["confs/std-bcc"],
             with_relax=True,
             selected_properties=[],
             interaction_type="deepmd",
@@ -60,22 +74,43 @@ class TestGuiSubmitBuilder(unittest.TestCase):
         self.assertIn("relaxation", payload)
         self.assertEqual(payload["interaction"]["type"], "deepmd")
         self.assertNotIn("model", payload["interaction"])
-        self.assertNotIn("type_map", payload["interaction"])
+        self.assertEqual(payload["interaction"]["type_map"], "auto")
 
     def test_parse_extra_elements(self):
         parsed = _parse_extra_elements("Cu, Ni Fe;Cr\nMn")
         self.assertEqual(parsed, ["Cu", "Ni", "Fe", "Cr", "Mn"])
 
-    def test_build_param_payload_dedup_elements(self):
+    def test_list_workdir_file_options_recurses_and_keeps_current(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.makedirs(os.path.join(tmpdir, "models"), exist_ok=True)
+            with open(os.path.join(tmpdir, "models", "Ni.eam.alloy"), "w", encoding="utf-8") as f:
+                f.write("eam")
+            options = _list_workdir_file_options(tmpdir, "missing.pb")
+            values = [item["value"] for item in options]
+            self.assertIn("models/Ni.eam.alloy", values)
+            self.assertEqual(values[0], "missing.pb")
+
+    def test_list_structure_path_options_returns_structure_dirs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.makedirs(os.path.join(tmpdir, "confs", "std-bcc"), exist_ok=True)
+            with open(os.path.join(tmpdir, "confs", "std-bcc", "POSCAR"), "w", encoding="utf-8") as f:
+                f.write("POSCAR")
+            options = _list_structure_path_options(tmpdir, ["confs/std-*"])
+            values = [item["value"] for item in options]
+            self.assertIn("confs/std-bcc", values)
+            self.assertEqual(values[0], "confs/std-*")
+
+    def test_build_param_payload_ignores_manual_elements_for_auto_type_map(self):
         payload = _build_param_payload(
             profile="lammps",
+            selected_structures=["confs/std-hcp"],
             with_relax=True,
             selected_properties=[],
             interaction_type="eam_alloy",
             interaction_model="x",
             element_slots=["Al", "Ni", "Al", "Cu", "Ni"],
         )
-        self.assertEqual(payload["interaction"]["type_map"], {"Al": 0, "Ni": 1, "Cu": 2})
+        self.assertEqual(payload["interaction"]["type_map"], "auto")
 
     def test_profile_templates_have_different_property_options(self):
         lammps = _extract_property_types(_load_profile_param_template("lammps"))
@@ -87,6 +122,9 @@ class TestGuiSubmitBuilder(unittest.TestCase):
         self.assertIn("phonon", vasp)
         self.assertIn("phonon", abacus)
         self.assertNotIn("phonon", lammps)
+        self.assertIn("gamma_surface", lammps)
+        self.assertIn("gamma_surface", vasp)
+        self.assertIn("gamma_surface", abacus)
 
     def test_lammps_interaction_types_exclude_vasp_abacus(self):
         options = [item["value"] for item in _interaction_type_options_for_profile("lammps", "meam")]
@@ -107,6 +145,7 @@ class TestGuiSubmitBuilder(unittest.TestCase):
         rows = _interaction_table_rows_from_template("abacus", abacus_template)
         payload = _build_param_payload(
             profile="abacus",
+            selected_structures=["confs/fcc-Al"],
             with_relax=True,
             selected_properties=[],
             interaction_type="abacus",
@@ -116,8 +155,46 @@ class TestGuiSubmitBuilder(unittest.TestCase):
             interaction_rows=rows,
             base_template=abacus_template,
         )
+        self.assertIn("input", payload["interaction"])
+        self.assertNotIn("incar", payload["interaction"])
         self.assertIn("orb_files", payload["interaction"])
         self.assertIn("potcars", payload["interaction"])
+
+    def test_autodetect_interaction_rows_for_vasp_uses_poscar_order_and_suffix(self):
+        vasp_template = _load_profile_param_template("vasp")
+        poscar_text = "Test\n1.0\n1 0 0\n0 1 0\n0 0 1\nMo Al\n1 1\nDirect\n0 0 0\n0.5 0.5 0.5\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.makedirs(os.path.join(tmpdir, "confs", "std-bcc"), exist_ok=True)
+            os.makedirs(os.path.join(tmpdir, "vasp_input"), exist_ok=True)
+            with open(os.path.join(tmpdir, "confs", "std-bcc", "POSCAR"), "w", encoding="utf-8") as f:
+                f.write(poscar_text)
+            with open(os.path.join(tmpdir, "vasp_input", "POTCAR.Mo"), "w", encoding="utf-8") as f:
+                f.write("Mo")
+            rows = _autodetect_interaction_rows("vasp", tmpdir, ["confs/std-bcc"], vasp_template)
+            self.assertEqual(rows[0]["element"], "Mo")
+            self.assertEqual(rows[0]["potcar"], "POTCAR.Mo")
+            self.assertEqual(rows[1]["element"], "Al")
+            self.assertIn("请提交对应元素的POTCAR", rows[1]["potcar"])
+
+    def test_autodetect_interaction_rows_for_abacus_uses_prefix(self):
+        abacus_template = _load_profile_param_template("abacus")
+        poscar_text = "Test\n1.0\n1 0 0\n0 1 0\n0 0 1\nAl H\n1 1\nDirect\n0 0 0\n0.5 0.5 0.5\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.makedirs(os.path.join(tmpdir, "confs", "std-bcc"), exist_ok=True)
+            os.makedirs(os.path.join(tmpdir, "abacus_input"), exist_ok=True)
+            with open(os.path.join(tmpdir, "confs", "std-bcc", "POSCAR"), "w", encoding="utf-8") as f:
+                f.write(poscar_text)
+            with open(os.path.join(tmpdir, "abacus_input", "Al_ONCV_PBE.upf"), "w", encoding="utf-8") as f:
+                f.write("Al")
+            with open(os.path.join(tmpdir, "abacus_input", "Al_gga_9au.orb"), "w", encoding="utf-8") as f:
+                f.write("Al")
+            rows = _autodetect_interaction_rows("abacus", tmpdir, ["confs/std-bcc"], abacus_template)
+            self.assertEqual(rows[0]["element"], "Al")
+            self.assertEqual(rows[0]["potcar"], "Al_ONCV_PBE.upf")
+            self.assertEqual(rows[0]["orb_file"], "Al_gga_9au.orb")
+            self.assertEqual(rows[1]["element"], "H")
+            self.assertIn("请提交对应元素的POTCAR", rows[1]["potcar"])
+            self.assertIn("请提交对应元素的ORB", rows[1]["orb_file"])
 
     def test_interaction_table_columns_profile_specific(self):
         lammps_cols = _interaction_table_columns_for_profile("lammps")
@@ -151,7 +228,7 @@ class TestGuiSubmitBuilder(unittest.TestCase):
         payload = {
             "interaction": {
                 "type": "abacus",
-                "incar": "abacus_input/INPUT(defaule value)",
+                "input": "abacus_input/INPUT(defaule value)",
             }
         }
         custom_content = "INPUT_PARAMETERS\ncustom_key custom_value\n"
@@ -216,6 +293,116 @@ class TestGuiSubmitBuilder(unittest.TestCase):
             self.assertEqual(state["email"], "")
             self.assertEqual(state["program_id"], "")
             self.assertFalse(state["password_set"])
+
+    def test_read_latest_workflow_id(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, ".workflow.log"), "w", encoding="utf-8") as f:
+                f.write("wf-old\tsubmit\t2026-01-01T00:00:00\t/tmp/old\n")
+                f.write("wf-new\tretrieve\t2026-01-01T00:00:01\t/tmp/new\n")
+            self.assertEqual(_read_latest_workflow_id(tmpdir), "wf-new")
+
+    def test_parse_submit_payloads_rejects_dot_in_structures(self):
+        global_text = json.dumps({})
+        param_text = json.dumps({"structures": ["."], "interaction": {"type": "eam_alloy"}})
+        _global_payload, _param_payload, feedback = _parse_submit_payloads(global_text, param_text)
+        self.assertIn("dflow does not allow '.' in `structures`", feedback["message"])
+        self.assertIn("parameter[0].structures[0] = .", feedback["message"])
+
+    def test_cleanup_reset_logs_removes_requested_files_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for name in ["dpdispatcher.log", ".workflow.log", "apex.log", "keep.log"]:
+                with open(os.path.join(tmpdir, name), "w", encoding="utf-8") as f:
+                    f.write("x")
+            removed = _cleanup_reset_logs(tmpdir)
+            self.assertEqual(removed, ["dpdispatcher.log", ".workflow.log", "apex.log"])
+            self.assertFalse(os.path.exists(os.path.join(tmpdir, "dpdispatcher.log")))
+            self.assertFalse(os.path.exists(os.path.join(tmpdir, ".workflow.log")))
+            self.assertFalse(os.path.exists(os.path.join(tmpdir, "apex.log")))
+            self.assertTrue(os.path.exists(os.path.join(tmpdir, "keep.log")))
+
+    def test_save_uploaded_files_writes_to_workdir(self):
+        payload = base64.b64encode(b"MODEL DATA\n").decode("ascii")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            saved = _save_uploaded_files([f"data:application/octet-stream;base64,{payload}"], ["model.pb"], tmpdir)
+            self.assertEqual(saved, ["confs/model.pb"])
+            with open(os.path.join(tmpdir, "confs", "model.pb"), "rb") as f:
+                self.assertEqual(f.read(), b"MODEL DATA\n")
+
+    def test_save_uploaded_files_to_workdir_root(self):
+        payload = base64.b64encode(b"INPUT\n").decode("ascii")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            saved = _save_uploaded_files(
+                [f"data:text/plain;base64,{payload}"],
+                ["global.json"],
+                tmpdir,
+                target_subdir="",
+            )
+            self.assertEqual(saved, ["global.json"])
+            with open(os.path.join(tmpdir, "global.json"), "rb") as f:
+                self.assertEqual(f.read(), b"INPUT\n")
+
+    def test_save_uploaded_files_creates_confs_and_nested_paths(self):
+        payload = base64.b64encode(b"POSCAR\n").decode("ascii")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            saved = _save_uploaded_files(
+                [f"data:text/plain;base64,{payload}"],
+                ["std-bcc/POSCAR"],
+                tmpdir,
+            )
+            self.assertEqual(saved, ["confs/std-bcc/POSCAR"])
+            with open(os.path.join(tmpdir, "confs", "std-bcc", "POSCAR"), "rb") as f:
+                self.assertEqual(f.read(), b"POSCAR\n")
+
+    def test_save_uploaded_files_rejects_path_filenames(self):
+        payload = base64.b64encode(b"bad").decode("ascii")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaises(ValueError):
+                _save_uploaded_files(f"data:text/plain;base64,{payload}", "../bad.txt", tmpdir)
+
+    def test_save_uploaded_files_extracts_zip_folder(self):
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, mode="w") as zf:
+            zf.writestr("my-folder/POSCAR", "POSCAR\n")
+            zf.writestr("my-folder/sub/INPUT", "INPUT\n")
+        payload = base64.b64encode(stream.getvalue()).decode("ascii")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            saved = _save_uploaded_files(
+                [f"data:application/zip;base64,{payload}"],
+                ["my-folder.zip"],
+                tmpdir,
+            )
+            self.assertIn("confs/my-folder/POSCAR", saved)
+            self.assertIn("confs/my-folder/sub/INPUT", saved)
+            with open(os.path.join(tmpdir, "confs", "my-folder", "POSCAR"), "rb") as f:
+                self.assertEqual(f.read(), b"POSCAR\n")
+
+    def test_save_uploaded_files_rejects_unsafe_zip_member(self):
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, mode="w") as zf:
+            zf.writestr("../escape.txt", "bad")
+        payload = base64.b64encode(stream.getvalue()).decode("ascii")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaises(ValueError):
+                _save_uploaded_files(
+                    [f"data:application/zip;base64,{payload}"],
+                    ["bad.zip"],
+                    tmpdir,
+                )
+
+    def test_summarize_step_progress(self):
+        steps = [
+            {"type": "Pod", "phase": "Pending"},
+            {"type": "Pod", "phase": "Running"},
+            {"type": "Pod", "phase": "Succeeded"},
+            {"type": "Pod", "phase": "Skipped"},
+            {"type": "StepGroup", "phase": "Running"},
+        ]
+        summary = _summarize_step_progress(steps)
+        self.assertEqual(summary["total"], 4)
+        self.assertEqual(summary["running"], 2)
+        self.assertEqual(summary["finished"], 2)
 
 
 if __name__ == "__main__":

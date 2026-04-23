@@ -3,7 +3,11 @@ import tempfile
 import os
 import json
 
-from apex.submit import validate_submit_paths, auto_fill_type_map_from_poscar
+from apex.submit import (
+    validate_submit_paths,
+    auto_fill_type_map_from_poscar,
+    pack_upload_dir,
+)
 
 
 class TestSubmitPathValidation(unittest.TestCase):
@@ -135,3 +139,73 @@ class TestSubmitPathValidation(unittest.TestCase):
                 payload["interaction"]["type_map"],
                 {"Al": 0, "Co": 1, "Cr": 2, "Fe": 3, "Mn": 4, "Ni": 5},
             )
+
+    def test_pack_joint_rejects_all_finished_relax_and_properties(self):
+        with tempfile.TemporaryDirectory() as work_dir, \
+                tempfile.TemporaryDirectory() as upload_dir:
+            conf_dir = os.path.join(work_dir, "confs", "std-001")
+            os.makedirs(conf_dir, exist_ok=True)
+            with open(os.path.join(conf_dir, "POSCAR"), "w", encoding="utf-8") as fp:
+                fp.write("test\n")
+
+            relax_result = os.path.join(conf_dir, "relaxation", "relax_task")
+            os.makedirs(relax_result, exist_ok=True)
+            with open(os.path.join(relax_result, "result.json"), "w", encoding="utf-8") as fp:
+                fp.write("{}")
+
+            prop_result = os.path.join(conf_dir, "eos_00")
+            os.makedirs(prop_result, exist_ok=True)
+            with open(os.path.join(prop_result, "result.json"), "w", encoding="utf-8") as fp:
+                fp.write("{}")
+            with open(os.path.join(prop_result, "result.out"), "w", encoding="utf-8") as fp:
+                fp.write("done\n")
+
+            relax_param = {
+                "structures": ["confs/std-*"],
+                "interaction": {
+                    "type": "lammps",
+                    "rerun_finished": False,
+                },
+            }
+            prop_param = {
+                "structures": ["confs/std-*"],
+                "interaction": {"type": "lammps"},
+                "properties": [
+                    {
+                        "type": "eos",
+                        "skip": False,
+                        "rerun_finished": False,
+                    }
+                ],
+            }
+
+            with self.assertRaisesRegex(
+                    RuntimeError,
+                    "All requested joint relaxation and property tasks are already finished",
+            ):
+                pack_upload_dir(
+                    work_dir=work_dir,
+                    upload_dir=upload_dir,
+                    relax_param=relax_param,
+                    prop_param=prop_param,
+                    flow_type="joint",
+                    exclude_upload_files=[],
+                )
+
+    def test_pack_upload_dir_reports_unmatched_structure_patterns(self):
+        with tempfile.TemporaryDirectory() as work_dir, \
+                tempfile.TemporaryDirectory() as upload_dir:
+            relax_param = {
+                "structures": ["confs/missing-*"],
+                "interaction": {"type": "lammps"},
+            }
+
+            with self.assertRaisesRegex(RuntimeError, "No structures matched"):
+                pack_upload_dir(
+                    work_dir=work_dir,
+                    upload_dir=upload_dir,
+                    relax_param=relax_param,
+                    prop_param=None,
+                    flow_type="relax",
+                    exclude_upload_files=[],
+                )
