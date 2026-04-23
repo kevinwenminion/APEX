@@ -23,7 +23,6 @@ from apex.gui import gui_from_args
 from apex.preview import preview_from_args
 from apex.account import account_from_args
 from apex.rss import rss_from_args
-from apex.replay_failed import replay_failed_from_args
 from apex.utils import load_config_file
 
 
@@ -526,79 +525,6 @@ def parse_args():
     )
 
     ##########################################
-    # Replay failed artifacts
-    parser_replay_failed = subparsers.add_parser(
-        "replay-failed",
-        help="Extract retryable tasks from .failed-artifacts and build a minimal resubmit workspace",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser_replay_failed.add_argument(
-        "-w", "--work",
-        type=str,
-        default='.',
-        help="Base working directory that contains .failed-artifacts",
-    )
-    parser_replay_failed.add_argument(
-        "--failed-root",
-        type=str,
-        default=".failed-artifacts",
-        help="Relative path from --work to failed artifacts root",
-    )
-    parser_replay_failed.add_argument(
-        "-o", "--output",
-        type=str,
-        default="./retry_workspace",
-        help="Output directory for the minimal retry workspace",
-    )
-    parser_replay_failed.add_argument(
-        "--manifest",
-        type=str,
-        default=None,
-        help="Optional path for retry manifest json",
-    )
-    parser_replay_failed.add_argument(
-        "--submit",
-        action="store_true",
-        help="Automatically run apex submit for the generated retry workspace",
-    )
-    parser_replay_failed.add_argument(
-        "--parameter",
-        type=str,
-        nargs='+',
-        default=None,
-        help="Parameter json files used when --submit is enabled",
-    )
-    parser_replay_failed.add_argument(
-        "-c", "--config",
-        type=str,
-        nargs='?',
-        default='./global.json',
-        help="Global config json used when --submit is enabled",
-    )
-    parser_replay_failed.add_argument(
-        '-f', "--flow",
-        choices=['relax', 'props', 'joint'],
-        default=None,
-        help="Optional flow type passed to apex submit when --submit is enabled",
-    )
-    parser_replay_failed.add_argument(
-        "-n", "--name",
-        type=str,
-        default=None,
-        help="Optional workflow name used when --submit is enabled",
-    )
-    parser_replay_failed.add_argument(
-        "-s", "--submit_only",
-        action="store_true",
-        help="Submit workflow only without auto-retrieval when --submit is enabled",
-    )
-    parser_replay_failed.add_argument(
-        "-d", "--debug",
-        action="store_true",
-        help="Run submit via local debug mode when --submit is enabled",
-    )
-
-    ##########################################
     # GUI
     parser_gui = subparsers.add_parser(
         "gui",
@@ -1067,8 +993,6 @@ def main():
         )
     elif args.cmd == 'account':
         account_from_args(args)
-    elif args.cmd == 'replay-failed':
-        replay_failed_from_args(args)
     elif args.cmd == 'rss':
         rss_from_args(args.rss_json)
     elif args.cmd == 'preview':
