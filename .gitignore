@@ -16,3 +16,4 @@ potential
 all_result.json
 TEST
 TEST/*
+__pycache__

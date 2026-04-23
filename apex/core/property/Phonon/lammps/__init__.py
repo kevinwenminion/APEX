@@ -1,6 +1,7 @@
 """LAMMPS binding for Phonon."""
 
 import os
+import re
 import shutil
 
 from apex.core.property._interaction_helpers import ensure_lammps_interaction
@@ -37,13 +38,21 @@ class Phonon(SharedPhonon):
     def _post_process_backend(self, task_list):
         for ii in task_list:
             os.chdir(ii)
-            phonolammps_cmd = "phonolammps in.lammps -c POSCAR --dim %s %s %s " % (
-                self.supercell_size[0],
-                self.supercell_size[1],
-                self.supercell_size[2],
-            )
+            with open("in.lammps", "r") as f1:
+                contents = f1.readlines()
+            pair_line_id = None
+            for jj, line in enumerate(contents):
+                if re.search("pair_coeff", line):
+                    pair_line_id = jj
+                    break
+            if pair_line_id is not None:
+                del contents[pair_line_id + 1:]
+
+            with open("in.lammps", "w") as f2:
+                f2.write(self._ensure_deepmd_plugin_loaded("".join(contents)))
+
             with open("run_command", "w") as f3:
-                f3.write(phonolammps_cmd)
+                f3.write(self._build_phonolammps_run_command())
 
     def _compute_backend_band(self, work_path, all_tasks):
         os.chdir(all_tasks[0])
