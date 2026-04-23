@@ -19,6 +19,10 @@ from apex.step import do_step_from_args
 from apex.submit import submit_from_args
 from apex.archive import archive_from_args
 from apex.report import report_from_args
+from apex.gui import gui_from_args
+from apex.preview import preview_from_args
+from apex.account import account_from_args
+from apex.rss import rss_from_args
 from apex.utils import load_config_file
 
 
@@ -307,6 +311,12 @@ def parse_args():
         default=None,
         help="retry a step in a running workflow with step ID (experimental)",
     )
+    parser_retry.add_argument(
+        "-c", "--config",
+        type=str, nargs='?',
+        default='./global.json',
+        help="The json file to config workflow",
+    )
     # resume workflow
     parser_resume = subparsers.add_parser(
         "resume",
@@ -457,6 +467,141 @@ def parse_args():
         default='.',
         help="(Optional) Working directory or json file path to be reported",
     )
+    parser_report.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not automatically open the report in a browser",
+    )
+    parser_report.add_argument(
+        "-H", "--host",
+        type=str,
+        default="127.0.0.1",
+        help="Host for the report Dash server",
+    )
+    parser_report.add_argument(
+        "-p", "--port",
+        type=int,
+        default=8070,
+        help="Port for the report Dash server",
+    )
+
+    ##########################################
+    # RSS
+    parser_rss = subparsers.add_parser(
+        "rss",
+        help="Generate RSS structures from an rss.json config",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser_rss.add_argument(
+        "rss_json", type=str,
+        help="Path to rss json config file",
+    )
+
+    ##########################################
+    # Preview GIFs
+    parser_preview = subparsers.add_parser(
+        "preview",
+        help="Generate preview GIFs from param_props JSON files",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser_preview.add_argument(
+        "parameters",
+        type=str,
+        nargs='+',
+        help="param_props JSON files, e.g. param_props_gamma*.json",
+    )
+    parser_preview.add_argument(
+        "--gif-fps",
+        type=int,
+        default=8,
+        help="GIF frames per second",
+    )
+    parser_preview.add_argument(
+        "--gif-dpi",
+        type=int,
+        default=140,
+        help="GIF rendering DPI",
+    )
+    parser_preview.add_argument(
+        "--gif-padding",
+        type=float,
+        default=0.30,
+        help="Relative x/y padding ratio around the global bounds",
+    )
+    parser_preview.add_argument(
+        "--gif-xshift",
+        type=float,
+        default=0.0,
+        help="Shift the rendered viewport horizontally by a fraction of the data span",
+    )
+    parser_preview.add_argument(
+        "--gif-yshift",
+        type=float,
+        default=0.0,
+        help="Shift the rendered viewport vertically by a fraction of the data span; positive values move the structure downward",
+    )
+
+    ##########################################
+    # GUI
+    parser_gui = subparsers.add_parser(
+        "gui",
+        help="Launch a web-based graphical interface for common APEX commands",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser_gui.add_argument(
+        "-H", "--host",
+        type=str,
+        default="127.0.0.1",
+        help="Host address used by the Dash GUI server",
+    )
+    parser_gui.add_argument(
+        "-p", "--port",
+        type=int,
+        default=8060,
+        help="Port used by the Dash GUI server",
+    )
+    parser_gui.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not automatically open a browser window",
+    )
+
+    ##########################################
+    # Account
+    parser_account = subparsers.add_parser(
+        "account",
+        help="Manage default Bohrium account and cloud config",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser_account.add_argument(
+        "--show",
+        action="store_true",
+        help="Show saved default account config",
+    )
+    parser_account.add_argument(
+        "--reset",
+        action="store_true",
+        help="Remove saved default account config",
+    )
+    parser_account.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Do not ask for input when no account fields are passed",
+    )
+    parser_account.add_argument(
+        "--file",
+        type=str,
+        default=None,
+        help="Custom path for account config file",
+    )
+    parser_account.add_argument("--dflow-host", dest="dflow_host", type=str, default=None)
+    parser_account.add_argument("--k8s-api-server", dest="k8s_api_server", type=str, default=None)
+    parser_account.add_argument("--batch-type", dest="batch_type", type=str, default=None)
+    parser_account.add_argument("--context-type", dest="context_type", type=str, default=None)
+    parser_account.add_argument("--email", type=str, default=None)
+    parser_account.add_argument("--password", type=str, default=None)
+    parser_account.add_argument("--program-id", dest="program_id", type=int, default=None)
+    parser_account.add_argument("--apex-image-name", dest="apex_image_name", type=str, default=None)
 
     parsed_args = parser.parse_args()
     # print help if no parser
@@ -517,6 +662,92 @@ def get_id_from_record(work_dir: os.PathLike, operation_name: str = None) -> str
         with open(workflow_log, 'a') as f:
             f.write('\t'.join(modified_record))
     return workflow_id
+
+
+def _safe_get(obj, key, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _get_step_artifacts(step):
+    outputs = _safe_get(step, "outputs")
+    if outputs is None:
+        return {}
+    return _safe_get(outputs, "artifacts", {}) or {}
+
+
+def _sanitize_path_token(text: str) -> str:
+    cleaned = "".join(ch if (ch.isalnum() or ch in "._-") else "-" for ch in str(text))
+    return cleaned.strip("-") or "unknown"
+
+
+def _collect_step_with_children(wf_info, root_step):
+    all_steps = [root_step]
+    queue = [root_step]
+    seen = set()
+    while queue:
+        step = queue.pop(0)
+        step_id = _safe_get(step, "id")
+        if not step_id or step_id in seen:
+            continue
+        seen.add(step_id)
+        try:
+            children = wf_info.get_step(parent_id=step_id, sort_by_generation=True)
+        except Exception:
+            children = []
+        all_steps.extend(children)
+        queue.extend(children)
+    return all_steps
+
+
+def _download_failure_artifacts_for_step(wf_info, root_step, key, work_dir):
+    preferred_names = {
+        "main-logs",
+        "main_logs",
+        "backward_dir",
+        "retrieve_path",
+        "output_all",
+        "output_work_path",
+        "task_paths",
+    }
+    related_steps = _collect_step_with_children(wf_info, root_step)
+    downloaded = 0
+    seen = set()
+    for step in related_steps:
+        step_id = _safe_get(step, "id", "step")
+        step_name = _safe_get(step, "displayName", _safe_get(step, "name", step_id))
+        artifacts = _get_step_artifacts(step)
+        for art_name, artifact in artifacts.items():
+            if art_name.startswith("dflow_"):
+                continue
+            if art_name not in preferred_names:
+                continue
+            key_tuple = (str(step_id), str(art_name))
+            if key_tuple in seen:
+                continue
+            seen.add(key_tuple)
+
+            target_dir = os.path.join(
+                work_dir,
+                ".failed-artifacts",
+                _sanitize_path_token(key),
+                _sanitize_path_token(step_name),
+                _sanitize_path_token(art_name),
+            )
+            os.makedirs(target_dir, exist_ok=True)
+            try:
+                download_artifact(artifact=artifact, path=target_dir)
+                downloaded += 1
+            except Exception as exc:
+                logging.warning(
+                    "Failed to download artifact %s for step %s (%s): %s",
+                    art_name,
+                    step_name,
+                    key,
+                    exc,
+                )
+    return downloaded
 
 
 def main():
@@ -718,14 +949,34 @@ def main():
         for key in download_keys:
             step = wf_info.get_step(key=key)[0]
             task_left -= 1
-            if step['phase'] == 'Succeeded':
+            phase = step['phase']
+            if phase == 'Succeeded':
                 logging.info(f"Retrieving {key}...({task_left} more left)")
-                download_artifact(
-                    artifact=step.outputs.artifacts['retrieve_path'],
-                    path=work_dir
-                )
+                try:
+                    download_artifact(
+                        artifact=step.outputs.artifacts['retrieve_path'],
+                        path=work_dir
+                    )
+                except Exception as exc:
+                    logging.warning(f"Retrieve {key} failed: {exc}")
             else:
-                logging.warning(f"Step {key} with status: {step['phase']} will be skipping...({task_left} more left)")
+                logging.warning(
+                    f"Step {key} with status: {phase} is not Succeeded; "
+                    f"trying to retrieve failure artifacts...({task_left} more left)"
+                )
+                downloaded = _download_failure_artifacts_for_step(
+                    wf_info=wf_info,
+                    root_step=step,
+                    key=key,
+                    work_dir=work_dir,
+                )
+                if downloaded == 0:
+                    logging.warning(f"No retrievable failure artifacts found for {key}")
+                else:
+                    logging.info(
+                        f"Retrieved {downloaded} failure artifact groups for {key} "
+                        f"under {os.path.join(work_dir, '.failed-artifacts')}"
+                    )
     elif args.cmd == 'do':
         header()
         do_step_from_args(
@@ -749,7 +1000,23 @@ def main():
         report_from_args(
             config_file=args.config,
             path_list=args.work,
+            open_browser=not args.no_browser,
+            host=args.host,
+            port=args.port,
         )
+    elif args.cmd == 'gui':
+        header()
+        gui_from_args(
+            host=args.host,
+            port=args.port,
+            open_browser=not args.no_browser
+        )
+    elif args.cmd == 'account':
+        account_from_args(args)
+    elif args.cmd == 'rss':
+        rss_from_args(args.rss_json)
+    elif args.cmd == 'preview':
+        preview_from_args(args)
     else:
         raise RuntimeError(
             f"unknown command {args.cmd}\n{parser.print_help()}"

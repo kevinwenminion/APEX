@@ -1,0 +1,12 @@
+{
+    "interaction": {
+        "type": "meam",
+        "model": [
+            "library.meam",
+            "Al.meam"
+        ],
+        "type_map": {
+            "Al": 0
+        }
+    }
+}

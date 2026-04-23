@@ -25,6 +25,83 @@ upload_packages.append(__file__)
 # LAMMPS_INTER_TYPE = ['deepmd', 'eam_alloy', 'meam', 'eam_fs', 'meam_spline', 'snap', 'gap', 'rann', 'mace']
 MULTI_MODELS_INTER_TYPE = ["meam", "snap", "gap"]
 
+
+def _render_finitetlatt_input(conf, type_map, interaction, model_param, task_param=None):
+    from apex.core.property.FiniteTlatt.lammps.input import (
+        render_finitetlatt_lammps_input,
+    )
+
+    return render_finitetlatt_lammps_input(
+        conf, type_map, interaction, model_param, task_param
+    )
+
+
+def _render_gamma_input(conf, type_map, interaction, model_param, task_param=None):
+    from apex.core.property.Gamma.lammps.input import render_gamma_lammps_input
+
+    return render_gamma_lammps_input(
+        conf, type_map, interaction, model_param, task_param
+    )
+
+
+def _render_elastic_input(conf, type_map, interaction, model_param, task_param=None):
+    from apex.core.property.Elastic.lammps.input import render_elastic_lammps_input
+
+    return render_elastic_lammps_input(
+        conf, type_map, interaction, model_param, task_param
+    )
+
+
+def _render_phonon_input(conf, type_map, interaction, model_param, task_param=None):
+    from apex.core.property.Phonon.lammps.input import render_phonon_lammps_input
+
+    return render_phonon_lammps_input(
+        conf, type_map, interaction, model_param, task_param
+    )
+
+
+def _finitetlatt_file_manifest(model_files, default_manifest):
+    from apex.core.property.FiniteTlatt.lammps import get_lammps_file_manifest
+
+    return get_lammps_file_manifest(model_files, default_manifest)
+
+
+def _eos_file_manifest(model_files, default_manifest):
+    from apex.core.property.EOS.lammps import get_lammps_file_manifest
+
+    return get_lammps_file_manifest(model_files, default_manifest)
+
+
+def _phonon_file_manifest(model_files, default_manifest):
+    from apex.core.property.Phonon.lammps import get_lammps_file_manifest
+
+    return get_lammps_file_manifest(model_files, default_manifest)
+
+
+def _eos_runtime_policy(default_policy):
+    from apex.core.property.EOS.lammps import get_lammps_runtime_policy
+
+    return get_lammps_runtime_policy(default_policy)
+
+
+PROPERTY_LAMMPS_INPUT_RENDERERS = {
+    "elastic": _render_elastic_input,
+    "finitetlatt": _render_finitetlatt_input,
+    "gamma": _render_gamma_input,
+    "gamma_surface": _render_gamma_input,
+    "phonon": _render_phonon_input,
+}
+
+PROPERTY_LAMMPS_FILE_MANIFESTS = {
+    "eos": _eos_file_manifest,
+    "finitetlatt": _finitetlatt_file_manifest,
+    "phonon": _phonon_file_manifest,
+}
+
+PROPERTY_LAMMPS_RUNTIME_POLICIES = {
+    "eos": _eos_runtime_policy,
+}
+
 class Lammps(Task):
     def __init__(self, inter_parameter, path_to_poscar):
         self.inter = inter_parameter
@@ -192,7 +269,16 @@ class Lammps(Task):
                 )
                 maxeval = cal_setting["maxeval"]
 
-            if cal_type == "relaxation":
+            property_renderer = PROPERTY_LAMMPS_INPUT_RENDERERS.get(prop_type)
+            if property_renderer is not None:
+                fc = property_renderer(
+                    "conf.lmp",
+                    self.type_map,
+                    self.inter_func,
+                    self.model_param,
+                    task_param,
+                )
+            elif cal_type == "relaxation":
                 relax_pos = cal_setting["relax_pos"]
                 relax_shape = cal_setting["relax_shape"]
                 relax_vol = cal_setting["relax_vol"]
@@ -286,8 +372,13 @@ class Lammps(Task):
                     "conf.lmp", self.type_map, self.inter_func, self.model_param
                 )
             elif cal_type == "npt+ave/time":
-                fc = lammps_utils.make_lammps_FiniteTlatt(
-                    "conf.lmp", self.type_map, self.inter_func, self.model_param
+                # Backward-compatible fallback for legacy FiniteTlatt tasks routed only by cal_type.
+                fc = PROPERTY_LAMMPS_INPUT_RENDERERS["finitetlatt"](
+                    "conf.lmp",
+                    self.type_map,
+                    self.inter_func,
+                    self.model_param,
+                    task_param,
                 )
 
             else:
@@ -295,8 +386,8 @@ class Lammps(Task):
 
         dumpfn(task_param, os.path.join(output_dir, "task.json"), indent=4)
 
-        in_lammps_not_link_list = ["eos"]
-        if task_type not in in_lammps_not_link_list:
+        runtime_policy = self._runtime_policy(task_type)
+        if runtime_policy["shared_input_file"]:
             with open(os.path.join(output_dir, "../in.lammps"), "w") as fp:
                 fp.write(fc)
             cwd = os.getcwd()
@@ -532,32 +623,51 @@ class Lammps(Task):
         }
         return result_dict
 
-    def forward_files(self, property_type="relaxation"):
+    def _model_file_names(self):
         if self.inter_type in MULTI_MODELS_INTER_TYPE:
-            return ["conf.lmp", "in.lammps"] + list(map(os.path.basename, self.model))
-        elif property_type == "finitetlatt":
-            return ["in.lammps", "variable_FiniteTlatt.in", os.path.basename(self.model)]
+            return list(map(os.path.basename, self.model))
+        return [os.path.basename(self.model)]
+
+    def _default_file_manifest(self, property_type="relaxation"):
+        model_files = self._model_file_names()
+        if self.inter_type in MULTI_MODELS_INTER_TYPE:
+            forward_files = ["conf.lmp", "in.lammps"] + model_files
+            forward_common_files = ["in.lammps"] + model_files
         else:
-            return ["conf.lmp", "in.lammps", os.path.basename(self.model)]
+            forward_files = ["conf.lmp", "in.lammps", model_files[0]]
+            forward_common_files = ["in.lammps", model_files[0]]
+
+        return {
+            "forward_files": forward_files,
+            "forward_common_files": forward_common_files,
+            "backward_files": ["log.lammps", "outlog", "dump.relax"],
+        }
+
+    def _file_manifest(self, property_type="relaxation"):
+        manifest = self._default_file_manifest(property_type)
+        property_manifest = PROPERTY_LAMMPS_FILE_MANIFESTS.get(property_type)
+        if property_manifest is not None:
+            manifest = property_manifest(self._model_file_names(), manifest)
+        return manifest
+
+    def _default_runtime_policy(self):
+        return {"shared_input_file": True}
+
+    def _runtime_policy(self, property_type="relaxation"):
+        policy = self._default_runtime_policy()
+        property_policy = PROPERTY_LAMMPS_RUNTIME_POLICIES.get(property_type)
+        if property_policy is not None:
+            policy = property_policy(policy)
+        return policy
+
+    def forward_files(self, property_type="relaxation"):
+        return self._file_manifest(property_type)["forward_files"]
 
     def forward_common_files(self, property_type="relaxation"):
-        if property_type not in ["eos"]:
-            if self.inter_type in MULTI_MODELS_INTER_TYPE:
-                return ["in.lammps"] + list(map(os.path.basename, self.model))
-            elif property_type == "finitetlatt":
-                return ["in.lammps", "variable_FiniteTlatt.in", os.path.basename(self.model)]
-            else:
-                return ["in.lammps", os.path.basename(self.model)]
-        else:
-            if self.inter_type in MULTI_MODELS_INTER_TYPE:
-                return list(map(os.path.basename, self.model))
-            else:
-                return [os.path.basename(self.model)]
+        return self._file_manifest(property_type)["forward_common_files"]
 
     def backward_files(self, property_type="relaxation"):
-        if property_type == "phonon":
-            return ["outlog", "FORCE_CONSTANTS"]
-        elif property_type == "gruneisen":
+        if property_type == "gruneisen":
             return [
                 "log.lammps",
                 "outlog",
@@ -567,7 +677,4 @@ class Lammps(Task):
                 "band.yaml",
                 "phonopy.yaml",
             ]
-        elif property_type == "finitetlatt":
-            return ["log.lammps", "outlog", "dump.relax", "average_box.txt"]
-        else:
-            return ["log.lammps", "outlog", "dump.relax"]
+        return self._file_manifest(property_type)["backward_files"]

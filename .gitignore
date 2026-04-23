@@ -1,0 +1,18 @@
+.github
+.venv
+__pycache__
+dpdispatcher.log
+apex_flow.egg-info
+.DS_Store
+.workflow.log
+*.egg-info
+# User-Generated Files
+reference
+relaxation
+eos_*
+elastic_*
+template
+potential
+all_result.json
+TEST
+TEST/*

@@ -8,7 +8,7 @@ import dpdata
 import numpy as np
 from monty.serialization import loadfn
 from pymatgen.io.vasp import Incar
-from apex.core.property.EOS import EOS
+from apex.core.property.EOS.vasp import EOS
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 __package__ = "tests"
@@ -16,6 +16,8 @@ __package__ = "tests"
 
 class TestEOS(unittest.TestCase):
     def setUp(self):
+        self._cwd = os.getcwd()
+        os.chdir(os.path.abspath(os.path.dirname(__file__)))
         _jdata = {
             "structures": ["confs/std-fcc"],
             "interaction": {
@@ -62,6 +64,7 @@ class TestEOS(unittest.TestCase):
             shutil.rmtree(self.equi_path)
         if os.path.exists(self.target_path):
             shutil.rmtree(self.target_path)
+        os.chdir(self._cwd)
 
     def test_task_type(self):
         self.assertEqual("eos", self.eos.task_type())

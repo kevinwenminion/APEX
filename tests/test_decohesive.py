@@ -12,7 +12,7 @@ from pymatgen.core.surface import SlabGenerator
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 __package__ = "tests"
 
-from apex.core.property.Decohesive import Decohesive
+from apex.core.property.Decohesive.vasp import Decohesive
 from apex.reporter.property_report import DecohesiveReport
 
 class TestDecohesive(unittest.TestCase):

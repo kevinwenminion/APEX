@@ -18,28 +18,32 @@ class StructureInfo(object):
         self.__lattice_type = analyzer.get_lattice_type()
         self.__num_atoms = structure.num_sites
         self.__crystal_structure = self.__indentify_crystal()
+        if self.__crystal_structure == "other":
+            self.__crystal_structure = self.__indentify_crystal_from_prototype(
+                structure, kwargs
+            )
         # standard structure
         self.orig_structure = structure
         self.primitive_structure = analyzer.find_primitive()
         self.conventional_structure = analyzer.get_conventional_standard_structure()
 
-    def __indentify_crystal(self) -> str:
-        if self.__lattice_type == 'cubic':
-            if self.__num_atoms == 1 and self.__space_group_symbol == 'Pm-3m':
+    def __classify_from_symmetry(self, lattice_type, space_group_symbol, num_atoms):
+        if lattice_type == 'cubic':
+            if num_atoms == 1 and space_group_symbol == 'Pm-3m':
                 structure_type = 'sc'
-            elif self.__num_atoms == 2 and self.__space_group_symbol == 'Im-3m':
+            elif num_atoms == 2 and space_group_symbol == 'Im-3m':
                 structure_type = 'bcc'
-            elif self.__num_atoms == 4 and self.__space_group_symbol == 'Fm-3m':
+            elif num_atoms == 4 and space_group_symbol == 'Fm-3m':
                 structure_type = 'fcc'
-            elif self.__num_atoms == 8 and self.__space_group_symbol == 'Fd-3m':
+            elif num_atoms == 8 and space_group_symbol == 'Fd-3m':
                 structure_type = 'diamond'
             else:
                 structure_type = 'other'
 
-        elif self.__lattice_type == 'hexagonal':
-            if self.__num_atoms == 2 and self.__space_group_symbol == 'P6_3/mmc':
+        elif lattice_type == 'hexagonal':
+            if num_atoms == 2 and space_group_symbol == 'P6_3/mmc':
                 structure_type = 'hcp'
-            elif self.__space_group_symbol == 'P6/mmm':
+            elif space_group_symbol == 'P6/mmm':
                 structure_type = 'c32'
             else:
                 structure_type = 'other'
@@ -47,6 +51,42 @@ class StructureInfo(object):
             structure_type = 'other'
 
         return structure_type
+
+    def __indentify_crystal(self) -> str:
+        return self.__classify_from_symmetry(
+            self.__lattice_type, self.__space_group_symbol, self.__num_atoms
+        )
+
+    def __indentify_crystal_from_prototype(self, structure, kwargs) -> str:
+        # Replace all species with one element and infer the parent lattice prototype.
+        # This helps classify alloy/disordered supercells whose chemistry breaks symmetry.
+        prototype = pymatgen.core.Structure(
+            lattice=structure.lattice,
+            species=['H'] * structure.num_sites,
+            coords=structure.frac_coords,
+            coords_are_cartesian=False,
+            site_properties=structure.site_properties,
+        )
+
+        prototype_kwargs = dict(kwargs)
+        symprec = prototype_kwargs.get('symprec', 1e-3)
+        angle_tolerance = prototype_kwargs.get('angle_tolerance', 5)
+        if symprec is None:
+            symprec = 1e-3
+        if angle_tolerance is None:
+            angle_tolerance = 5
+        prototype_kwargs['symprec'] = max(float(symprec), 0.1)
+        prototype_kwargs['angle_tolerance'] = max(float(angle_tolerance), 5)
+
+        analyzer = SpacegroupAnalyzer(prototype, **prototype_kwargs)
+        lattice_type = analyzer.get_lattice_type()
+        space_group_symbol = analyzer.get_space_group_symbol()
+        num_atoms = analyzer.get_conventional_standard_structure().num_sites
+        return self.__classify_from_symmetry(
+            lattice_type,
+            space_group_symbol,
+            num_atoms,
+        )
 
     @property
     def space_group_symbol(self):

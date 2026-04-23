@@ -1,0 +1,65 @@
+{
+    "acceptance_ratio": 0.9843392574344536,
+    "accepted_moves": 5594,
+    "achieved_sro": {
+        "0": {
+            "Co-Co": 0.1009523809523809,
+            "Co-Mg": 0.1847619047619048,
+            "Co-O": -0.1428571428571428,
+            "Mg-Mg": 0.1009523809523809,
+            "Mg-O": -0.1428571428571428,
+            "O-O": 0.1428571428571429
+        }
+    },
+    "attempted_moves": 5683,
+    "best_objective": 0.1157442176870748,
+    "composition_counts": {
+        "anion": {
+            "O": 150
+        },
+        "cation": {
+            "Co": 75,
+            "Mg": 75
+        }
+    },
+    "final_objective": 0.12244897959183673,
+    "initial_objective": 0.12897959183673463,
+    "output_structures": [
+        "/Users/yinziqi/Documents/Codex-Space/APEX/examples/rss/HEO/RSS_HEO/conf_001/POSCAR",
+        "/Users/yinziqi/Documents/Codex-Space/APEX/examples/rss/HEO/RSS_HEO/conf_002/POSCAR",
+        "/Users/yinziqi/Documents/Codex-Space/APEX/examples/rss/HEO/RSS_HEO/conf_003/POSCAR"
+    ],
+    "sampling": {
+        "interval": 50,
+        "near_target_threshold": 0.01,
+        "num_configs": 3,
+        "patience": null,
+        "sampled_steps": [
+            -1,
+            -1,
+            -1
+        ]
+    },
+    "seed": 21,
+    "shell_cutoffs": [
+        3.5
+    ],
+    "sro_gap": {
+        "best_max_abs": 0.1847619047619048,
+        "best_rmse": 0.13889097504102202,
+        "final_max_abs": 0.23809523809523814,
+        "final_rmse": 0.14285714285714285,
+        "initial_max_abs": 0.16190476190476188,
+        "initial_rmse": 0.14661718398419665
+    },
+    "target_sro": {
+        "0": {
+            "Co-Co": 0.0,
+            "Co-Mg": 0.0,
+            "Co-O": 0.0,
+            "Mg-Mg": 0.0,
+            "Mg-O": 0.0,
+            "O-O": 0.0
+        }
+    }
+}

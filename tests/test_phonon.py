@@ -9,7 +9,7 @@ import dpdata
 import numpy as np
 from monty.serialization import loadfn
 from pymatgen.io.vasp import Incar
-from apex.core.property.Phonon import Phonon
+from apex.core.property.Phonon.vasp import Phonon
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 __package__ = "tests"

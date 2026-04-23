@@ -1,0 +1,13 @@
+ # in.variable 
+variable temperature equal __TEMPERATURE__
+variable nx equal __NX__
+variable ny equal __NY__
+variable nz equal __NZ__
+variable equi_step equal __EQUI_STEP__
+variable N_every equal __N_EVERY__
+variable N_repeat equal __N_REPEAT__
+variable N_freq equal __N_FREQ__
+variable ave_step equal __AVE_STEP__
+variable timestep equal __TIMESTEP__
+variable tdamp equal __TDAMP__
+variable pdamp equal __PDAMP__

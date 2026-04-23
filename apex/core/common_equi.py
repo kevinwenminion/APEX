@@ -5,7 +5,10 @@ import logging
 import dpdata
 from monty.serialization import dumpfn
 from pymatgen.core.structure import Structure
-from pymatgen.analysis.structure_matcher import StructureMatcher
+try:
+    from pymatgen.core.structure_matcher import StructureMatcher
+except ImportError:  # pragma: no cover
+    from pymatgen.analysis.structure_matcher import StructureMatcher
 from apex.core.calculator.lib import abacus_utils
 from apex.core.lib import crys
 from apex.core.calculator.calculator import make_calculator

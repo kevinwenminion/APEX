@@ -3,9 +3,9 @@
 </div>
 
 # APEX: Alloy Property EXplorer
-[![](https://img.shields.io/badge/release-1.2.0-blue.svg)](https://github.com/deepmodeling/APEX)
+[![](https://img.shields.io/badge/release-1.2.1-blue.svg)](https://github.com/deepmodeling/APEX)
 
-
+[1.2.1 Changelog](./CHANGELOG-1.2.1.md)
 
 [APEX](https://github.com/deepmodeling/APEX) helps materials scientists build reliable alloy property workflows that run on local machines, on-premises clusters, or the Bohrium cloud. It refactors the [DP-GEN](https://github.com/deepmodeling/dpgen) `auto_test` module into a flexible, dflow-powered Python package that prepares tasks, dispatches calculations, monitors progress, and collects results for calculators such as **LAMMPS**, **VASP**, and **ABACUS**.
 
@@ -53,6 +53,8 @@ APEX currently offers calculation methods for the following alloy properties:
   - [3.4 Submit and Monitor Workflows](#34-submit-and-monitor-workflows)
   - [3.5 Run Individual Steps](#35-run-individual-steps)
   - [3.6 After Submission](#36-after-submission)
+  - [3.7 Graphical Interface (GUI)](#37-graphical-interface-gui)
+  - [3.8 Bohrium Account Defaults](#38-bohrium-account-defaults)
 - [4. Detailed Parameter Reference](#4-detailed-parameter-reference)
   - [4.1 Global Configuration](#41-global-configuration-globaljson)
   - [4.2 Calculation Parameters](#42-calculation-parameters-paramjson)
@@ -63,7 +65,7 @@ APEX currently offers calculation methods for the following alloy properties:
   - [4.7 Surface](#surface)
   - [4.8 Vacancy](#vacancy)
   - [4.9 Interstitial](#interstitial)
-  - [4.10 Gamma Line](#gamma-line-generalised-stacking-fault)
+  - [4.10 Gamma Line/Surface](#gamma-line-generalised-stacking-fault)
   - [4.11 Phonon Spectra](#phonon-spectra)
   - [4.12 Grüneisen Parameters and Thermal Expansion](#grüneisen-parameters-and-thermal-expansion)
   - [4.13 Finite-Temperature Lattice Parameters](#finite-temperature-lattice-parameters)
@@ -126,6 +128,62 @@ lammps_demo/
 
 - **`global_bohrium.json`**: Provides computing resource information for Bohrium cloud platform execution.
 
+### 2.1.1 Random Solid Solution (RSS) Generation
+
+APEX provides a pseudo Monte Carlo sampler to generate random solid solutions
+with user-defined Warren-Cowley short-range order (SRO) targets.
+
+Run RSS generation with:
+
+```bash
+apex rss rss.json
+```
+
+#### Required input structure definition
+
+In `rss.json`, provide one of the following:
+
+- `parent_structure`: path to an existing structure file (typically POSCAR)
+- `parent_lattice`: programmatic parent lattice definition
+
+Example `parent_lattice`:
+
+```json
+{
+  "parent_lattice": {
+    "type": "B2",
+    "a": "auto",
+    "supercell": "auto"
+  },
+  "composition_tolerance": 0.001,
+  "supercell_shape": "near_cubic",
+  "maxmium_nums_atoms": 128
+}
+```
+
+Current supported `parent_lattice.type`:
+`fcc`, `bcc`, `sc`, `hcp`, `diamond`, `B2`, `L12`, `L10`.
+
+#### Key RSS parameters
+
+- `supercell` (`array[int, int, int]`): expands the loaded/built parent structure.
+  If you also set `parent_lattice.supercell`, both expansions are applied.
+- `output_structure` (`string`): output root directory for generated
+  configurations. Default is `RSS`. Each generated structure is written to a
+  separate `conf_###/POSCAR` directory, such as `conf_001/POSCAR`.
+- `compositions` (`object`): species fractions per sublattice.
+  Fractions within each sublattice must sum to `1.0`.
+
+Commonly used controls:
+
+- `sro_targets`, `shell_cutoffs`, `shell_weights`
+- `max_steps`, `temperature`, `tol`, `patience`
+- `num_configs`, `interval`, `seed`, `metadata`, `show_progress`
+
+For a complete key-by-key reference and runnable examples, see
+`examples/rss/README.md`.
+
+
 ### 2.2. Calculation Parameter Files
 
 Calculation parameter files define what properties to compute and with what parameters.
@@ -175,21 +233,27 @@ Create `global_bohrium.json` to submit workflows to the Bohrium cloud platform:
 
 ```json
 {
-  "dflow_host": "https://workflows.deepmodeling.com",
-  "k8s_api_server": "https://workflows.deepmodeling.com",
-  "batch_type": "Bohrium",
-  "context_type": "Bohrium",
-  "email": "YOUR_EMAIL",
-  "password": "YOUR_PASSWD",
-  "program_id": 1234,
-  "apex_image_name":"registry.dp.tech/dptech/prod-11045/apex-dependency:1.2.0",
   "lammps_image_name": "registry.dp.tech/dptech/prod-11045/deepmdkit-phonolammps:2.1.1",
   "lammps_run_command":"lmp -in in.lammps",
   "scass_type":"c8_m31_1 * NVIDIA T4"
 }
 ```
 
-<span style="color: red">**Important:** Replace `YOUR_EMAIL`, `YOUR_PASSWD` and `program_id` with your own Bohrium account credentials.</span>
+APEX now injects Bohrium defaults automatically (`dflow_host`, `k8s_api_server`, `batch_type`, `context_type`, `apex_image_name`).
+
+Save your Bohrium account once in `~/.apex/account.json`:
+
+```shell
+apex account
+```
+
+Or set it directly:
+
+```shell
+apex account --email YOUR_EMAIL --password YOUR_PASSWD --program-id 1234
+```
+
+When running `apex submit -c global_bohrium.json`, values in your json file still have highest priority and override the saved defaults.
 
 ### 2.4. Submit Your First Workflow
 
@@ -326,6 +390,59 @@ The same pattern applies to property calculations (`make_props`, `run_props`, `p
   ```
   Launch a Dash app (http://127.0.0.1:8050/) to explore multiple result sets side-by-side.
 
+### 3.7 Graphical Interface (GUI)
+
+APEX also provides a web GUI for common CLI operations (submit, list/get/retry/resume, retrieve, etc.):
+
+```shell
+apex gui [-H HOST] [-p PORT] [--no-browser]
+```
+
+- Default URL: `http://127.0.0.1:8060/`
+- The GUI has four tabs:
+  - **Submit**: simplified generator for `param.json` + `global.json`, then launch background submit:
+    `nohup apex submit param.json -c global.json > apex.log 2>&1 &`
+    (supports fixed element slots plus an extra-element input for larger `interaction.type_map`)
+    (the generated `param.json` is merged from profile-specific `param_structure.json` + `param_relax.json` + `param_props.json`,
+    and property checkboxes follow the selected profile)
+    (now also merges profile `param_interaction/param_interaction.json`; for VASP/ABACUS you can edit interaction rows in table form,
+    and default `INCAR`/`INPUT` files are auto-created from template when needed)
+    (interaction table now supports dynamic add/remove rows; ABACUS uses a third `orb_file` column)
+    (VASP/ABACUS also provide an `INCAR`/`INPUT` text editor in GUI; its content is written to the target file on submit)
+  - **Manage**: tail and refresh `apex.log` for background submit status
+  - **Advanced**: run custom command tails (except `gui`/`report`, which are blocked to avoid nested Dash servers)
+  - **Account**: overwrite Bohrium account fields (`email`/`program_id`/`password`) backed by `apex account` storage;
+    password is never displayed in GUI (only "set/unset" status)
+
+### 3.8 Bohrium Account Defaults
+
+Use `apex account` to store Bohrium credentials globally (default path: `~/.apex/account.json`):
+
+```shell
+# interactive mode
+apex account
+
+# non-interactive mode
+apex account --email YOUR_EMAIL --password YOUR_PASSWD --program-id 1234
+```
+
+Useful commands:
+
+```shell
+apex account --show
+apex account --reset
+```
+
+When you run `apex submit -c global_bohrium.json`, APEX auto-fills these defaults if missing:
+
+- `dflow_host`: `https://workflows.deepmodeling.com`
+- `k8s_api_server`: `https://workflows.deepmodeling.com`
+- `batch_type`: `Bohrium`
+- `context_type`: `Bohrium`
+- `apex_image_name`: `registry.dp.tech/dptech/prod-11045/apex-dependency:1.2.0`
+
+Priority rule: values in your `-c` json file override account defaults.
+
 
 
 ## 4. Detailed Parameter Reference
@@ -381,6 +498,8 @@ The same pattern applies to property calculations (`make_props`, `run_props`, `p
 | `program_id` | Integer | `None` | Bohrium program ID. |
 | `scass_type` | String | `None` | Bohrium node type. |
 
+> Note: in Bohrium workflows, these fields can be stored in `~/.apex/account.json` via `apex account`.
+
 ### 4.2. Calculation parameters (`param*.json`)
 
 The JSON schema inherits from `dpgen.autotest`. Below are example snippets for each workflow type:
@@ -417,7 +536,7 @@ The JSON schema inherits from `dpgen.autotest`. Below are example snippets for e
     "properties": [
       {
         "type": "eos",
-        "skip": false,
+        "req_calc": true,
         "vol_start": 0.6,
         "vol_end": 1.4,
         "vol_step": 0.1,
@@ -425,7 +544,7 @@ The JSON schema inherits from `dpgen.autotest`. Below are example snippets for e
       },
       {
         "type": "elastic",
-        "skip": false,
+        "req_calc": true,
         "norm_deform": 1e-2,
         "shear_deform": 1e-2,
         "cal_setting": {"etol": 0, "ftol": 1e-10}
@@ -454,7 +573,7 @@ The JSON schema inherits from `dpgen.autotest`. Below are example snippets for e
     "properties": [
       {
         "type": "eos",
-        "skip": false,
+        "req_calc": true,
         "vol_start": 0.6,
         "vol_end": 1.4,
         "vol_step": 0.1,
@@ -462,7 +581,7 @@ The JSON schema inherits from `dpgen.autotest`. Below are example snippets for e
       },
       {
         "type": "elastic",
-        "skip": false,
+        "req_calc": true,
         "norm_deform": 1e-2,
         "shear_deform": 1e-2,
         "cal_setting": {"etol": 0, "ftol": 1e-10}
@@ -470,6 +589,11 @@ The JSON schema inherits from `dpgen.autotest`. Below are example snippets for e
     ]
   }
   ```
+
+Property selection behavior:
+- If a property block is not present in `properties`, it is not calculated.
+- If a property block is present and `req_calc` is omitted, it is calculated by default.
+- Set `"req_calc": false` to explicitly disable that property.
 
 ### 4.3 EOS
 
@@ -535,7 +659,7 @@ The JSON schema inherits from `dpgen.autotest`. Below are example snippets for e
     <img src="./docs/images/interstitial_table.png" alt="Fig3" style="zoom: 90%;">
 </div>
 
-### 4.10 Gamma line (generalized stacking fault)
+### 4.10 Gamma line/surface (generalized stacking fault)
 
 <div style="text-align: center;">
     <img src="./docs/images/gamma_demo.png" alt="Fig2" style="zoom: 35%;">
@@ -592,7 +716,7 @@ Example:
 ```json
 {
   "type": "gamma",
-  "skip": true,
+  "req_calc": false,
   "plane_miller": [0, 0, 1],
   "slip_direction": [1, 0, 0],
   "hcp": {
@@ -607,9 +731,32 @@ Example:
   "n_steps": 10
 }
 ```
+To preview structure behave as expected before brusting computational resource, you can use `preview` to generate a gif file to visulize it.
+
+```shell
+apex preview gammaline.json
+```
+
 
 Nested dictionaries (`fcc`, `bcc`, `hcp`, etc.) override the top-level parameters for the corresponding lattice type.
 
+Similarly, to investigate Gamma Surface, change the type to `gamma_surface`, and adjust steps accordingly.
+
+```json
+"properties": [
+        {
+            "type": "gamma_surface",
+            "req_calc": true,
+            "plane_miller": [1, 1, 0],
+            "slip_direction": [1, -1, -1],
+            "supercell_size": [1, 1, 20],
+            "vacuum_size": 15,
+            "add_fix": ["true", "true", "false"],
+            "n_steps_x": 20,
+            "n_steps_y": 20
+        }
+    ]
+```
 ### 4.11 Phonon spectra
 
 APEX integrates parts of [dflow-phonon](https://github.com/Chengqian-Zhang/dflow-phonon) and wraps [Phonopy](https://github.com/phonopy/phonopy) / [phonoLAMMPS](https://github.com/abelcarreras/phonolammps). [SeeK-path](https://seekpath.readthedocs.io/en/latest/index.html) automatically generates high-symmetry k-paths.

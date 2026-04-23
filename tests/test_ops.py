@@ -15,7 +15,10 @@ from monty.serialization import loadfn
 
 from apex.op.relaxation_ops import RelaxMake
 from apex.op.property_ops import PropsMake
-from context import write_poscar
+try:
+    from context import write_poscar
+except ModuleNotFoundError:
+    from tests.context import write_poscar
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 __package__ = "tests"
@@ -90,6 +93,13 @@ class TestMakeRelaxOPs(unittest.TestCase):
 
 
 class TestMakePropsOPs(unittest.TestCase):
+    @staticmethod
+    def _expected_eos_task_count(prop_param):
+        vol_start = prop_param["vol_start"]
+        vol_end = prop_param["vol_end"]
+        vol_step = prop_param["vol_step"]
+        return int(round((vol_end - vol_start) / vol_step)) + 1
+
     def setUp(self) -> None:
         cwd = os.getcwd()
         self.path = cwd
@@ -119,51 +129,62 @@ class TestMakePropsOPs(unittest.TestCase):
 
     def test_vasp_make_props(self):
         os.chdir(self.vasp_dir)
+        param = loadfn('param_joint.json')
         op = PropsMake()
         out = op.execute(
             OPIO({
                 'input_work_path': self.vasp_dir,
                 'path_to_prop': 'confs/std-bcc/eos_00',
-                'prop_param': loadfn('param_joint.json')['properties'][0],
-                'inter_param': loadfn('param_joint.json')['interaction'],
+                'prop_param': param['properties'][0],
+                'inter_param': param['interaction'],
                 'do_refine': False
             }))
         os.chdir('..')
         self.assertTrue(os.path.exists(self.vasp_dir/'confs'))
         self.assertTrue(os.path.exists(self.vasp_dir/'confs/std-bcc/eos_00'))
-        self.assertEqual(len(out['task_paths']), 2)
+        self.assertEqual(
+            len(out['task_paths']),
+            self._expected_eos_task_count(param['properties'][0])
+        )
 
     def test_abacus_make_props(self):
         os.chdir(self.abacus_dir)
+        param = loadfn('param_joint.json')
         op = PropsMake()
         out = op.execute(
             OPIO({
                 'input_work_path': self.abacus_dir,
                 'path_to_prop': 'confs/fcc-Al/eos_00',
-                'prop_param': loadfn('param_joint.json')['properties'][0],
-                'inter_param': loadfn('param_joint.json')['interaction'],
+                'prop_param': param['properties'][0],
+                'inter_param': param['interaction'],
                 'do_refine': False
             }))
         os.chdir('..')
         self.assertTrue(os.path.exists(self.abacus_dir/'confs'))
         self.assertTrue(os.path.exists(self.abacus_dir/'confs/fcc-Al/eos_00'))
-        self.assertEqual(len(out['task_paths']), 2)
+        self.assertEqual(
+            len(out['task_paths']),
+            self._expected_eos_task_count(param['properties'][0])
+        )
 
     def test_lammps_make_props(self):
         os.chdir('lammps_input')
+        param = loadfn('param_joint.json')
         op = PropsMake()
         out = op.execute(
             OPIO({
                 'input_work_path': self.lammps_dir,
                 'path_to_prop': 'confs/std-bcc/eos_00',
-                'prop_param': loadfn('param_joint.json')['properties'][0],
-                'inter_param': loadfn('param_joint.json')['interaction'],
+                'prop_param': param['properties'][0],
+                'inter_param': param['interaction'],
                 'do_refine': False
             }))
         os.chdir('..')
         self.assertTrue(os.path.exists(self.lammps_dir/'confs'))
         self.assertTrue(os.path.exists(self.lammps_dir/'confs/std-bcc/eos_00'))
-        self.assertEqual(len(out['task_paths']), 2)
-
+        self.assertEqual(
+            len(out['task_paths']),
+            self._expected_eos_task_count(param['properties'][0])
+        )
 
 

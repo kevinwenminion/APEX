@@ -27,7 +27,8 @@ setuptools.setup(
         "seekpath",
         "fpop>=0.0.7",
         "boto3",
-        "pymongo"
+        "pymongo",
+        "dash[cloud]"
     ],
     classifiers=[
         "Programming Language :: Python :: 3",
