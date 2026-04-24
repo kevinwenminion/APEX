@@ -28,6 +28,7 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8060
 BLOCKED_INLINE_COMMANDS = {"gui", "report"}
 DEFAULT_SUBMIT_COMMAND = "nohup apex submit param.json -c global.json > apex.log 2>&1 &"
+SUBMIT_RUNNING_NOTICE = "任务已提交，正在运行，详情请转到Log页面查看"
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG_DIR = os.path.join(THIS_DIR, "default_config")
@@ -1384,7 +1385,6 @@ class ApexGuiApp:
                                 ),
                                 html.Br(),
                                 dbc.Button("Reset", id="submit-reset", color="secondary", className="me-2"),
-                                dbc.Button("Apply", id="submit-apply", color="secondary", className="me-2"),
                                 dbc.Button("Submit", id="submit-run", color="primary", className="me-2"),
                                 dbc.Button("Retrieve + Archive + Report", id="submit-finalize", color="success"),
                             ],
@@ -1497,7 +1497,7 @@ class ApexGuiApp:
             label="Advanced",
             children=[
                 html.P(
-                    "Run any APEX command tail. Example: submit param_joint.json -c global_bohrium.json",
+                    "Run any APEX command tail. Available options :'submit', 'do', 'retrieve', 'list', 'get', 'getsteps', 'getkeys', 'delete', 'resubmit', 'retry', 'resume', 'stop', 'suspend', 'terminate', 'archive', 'report', 'rss', 'preview', 'gui', 'account'; Example: submit param_joint.json -c global_bohrium.json",
                     className="text-muted",
                 ),
                 dbc.Textarea(
@@ -1508,7 +1508,7 @@ class ApexGuiApp:
                 html.Br(),
                 dbc.Button("Run advanced command", id="advanced-run", color="warning"),
                 html.Div(
-                    "Safety note: `report` and `gui` are blocked here to avoid nested Dash servers.",
+                    "Safety note: `gui` are blocked here to avoid nested Dash servers.",
                     className="text-muted mt-2",
                 ),
             ],
@@ -1839,7 +1839,6 @@ class ApexGuiApp:
             Output("submit-state", "data"),
             Output("submit-workflow-id", "value"),
             Input("submit-reset", "n_clicks"),
-            Input("submit-apply", "n_clicks"),
             Input("submit-run", "n_clicks"),
             Input("submit-finalize", "n_clicks"),
             Input("submit-confirm-dialog", "submit_n_clicks"),
@@ -1858,7 +1857,6 @@ class ApexGuiApp:
         )
         def _handle_command(
             _reset_clicks,
-            _apply_clicks,
             _submit_clicks,
             _finalize_clicks,
             _submit_confirm_clicks,
@@ -1908,7 +1906,7 @@ class ApexGuiApp:
                     message = f"Reset completed. No log files removed in {workdir}."
                 return _build_feedback(message=message, ok=True), False, default_confirm_message, state_payload, ""
 
-            if triggered_id in {"submit-apply", "submit-run", "submit-confirm-dialog"}:
+            if triggered_id in {"submit-run", "submit-confirm-dialog"}:
                 global_payload, param_payload, parse_feedback = _parse_submit_payloads(
                     submit_global_editor,
                     submit_param_editor,
@@ -1924,12 +1922,6 @@ class ApexGuiApp:
                 )
                 _write_submit_json_files(global_payload, param_payload, workdir, global_file, param_file)
 
-                if triggered_id == "submit-apply":
-                    message = f"Applied: saved {global_file} and {param_file} in {workdir}."
-                    if created_files:
-                        message += " Saved interaction files: " + ", ".join(created_files)
-                    return _build_feedback(message=message, ok=True), False, default_confirm_message, state_payload, current_workflow_id
-
             if triggered_id == "submit-run":
                 if os.path.exists(os.path.join(workdir, "apex.log")):
                     warning = _build_feedback(
@@ -1939,9 +1931,11 @@ class ApexGuiApp:
                     return warning, True, default_confirm_message, state_payload, current_workflow_id
 
                 run_feedback = _run_submit_in_background(param_file, global_file, cwd=workdir)
+                if run_feedback.get("ok"):
+                    run_feedback["message"] = f"{run_feedback.get('message', '').rstrip()}\n{SUBMIT_RUNNING_NOTICE}"
                 if created_files:
-                    extra_line = " Auto-created default files: " + ", ".join(created_files)
-                    run_feedback["message"] = f"{run_feedback.get('message', '').rstrip()}{extra_line}"
+                    extra_line = "Auto-created default files: " + ", ".join(created_files)
+                    run_feedback["message"] = f"{run_feedback.get('message', '').rstrip()}\n{extra_line}"
                 latest_workflow_id = _read_latest_workflow_id(workdir)
                 if latest_workflow_id:
                     state_payload["workflow_id"] = latest_workflow_id
@@ -1949,9 +1943,11 @@ class ApexGuiApp:
 
             if triggered_id == "submit-confirm-dialog":
                 run_feedback = _run_submit_in_background(param_file, global_file, cwd=workdir)
+                if run_feedback.get("ok"):
+                    run_feedback["message"] = f"{run_feedback.get('message', '').rstrip()}\n{SUBMIT_RUNNING_NOTICE}"
                 if created_files:
-                    extra_line = " Auto-created default files: " + ", ".join(created_files)
-                    run_feedback["message"] = f"{run_feedback.get('message', '').rstrip()}{extra_line}"
+                    extra_line = "Auto-created default files: " + ", ".join(created_files)
+                    run_feedback["message"] = f"{run_feedback.get('message', '').rstrip()}\n{extra_line}"
                 latest_workflow_id = _read_latest_workflow_id(workdir)
                 if latest_workflow_id:
                     state_payload["workflow_id"] = latest_workflow_id

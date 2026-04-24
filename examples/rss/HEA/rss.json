@@ -6,7 +6,7 @@
     },
     "composition_tolerance": 0.001,
     "supercell_shape": "near_cubic",
-    "maxmium_nums_atoms": 128,
+    "maxmium_nums_atoms": 20,
     "compositions": {
         "corner": {
             "Co": 0.2,
@@ -44,9 +44,9 @@
     },
     "shell_cutoffs": [2.8],
     "shell_weights": [1.0],
-    "max_steps": 400000,
+    "max_steps": 40000,
     "temperature": 0.10,
-    "num_configs": 3,
+    "num_configs": 500,
     "interval": 50,
     "show_progress": true,
     "patience": null,
