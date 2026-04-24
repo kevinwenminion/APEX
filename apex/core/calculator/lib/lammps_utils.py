@@ -277,7 +277,6 @@ def make_lammps_eval(conf, type_map, interaction, param):
     )
     ret += "dump            1 all custom 100 dump.relax id type xs ys zs fx fy fz\n"  # 06/09 give dump.relax
     ret += "run    0\n"
-    ret += "write_dump      all custom dump.relax id type xs ys zs fx fy fz modify sort id\n"
     ret += "variable        N equal count(all)\n"
     ret += "variable        V equal vol\n"
     ret += 'variable        E equal "c_mype"\n'
@@ -365,7 +364,6 @@ def make_lammps_equi(
             ret += "minimize        %e %e %d %d\n" % (etol, ftol, maxiter, maxeval)
             ret += "fix             1 all box/relax tri 0.0 \n"
     ret += "minimize        %e %e %d %d\n" % (etol, ftol, maxiter, maxeval)
-    ret += "write_dump      all custom dump.relax id type xs ys zs fx fy fz modify sort id\n"
     ret += "variable        N equal count(all)\n"
     ret += "variable        V equal vol\n"
     ret += 'variable        E equal "c_mype"\n'
@@ -388,6 +386,112 @@ def make_lammps_equi(
     ret += 'print "Final Stress (xx yy zz xy xz yz) = ${Pxx} ${Pyy} ${Pzz} ${Pxy} ${Pxz} ${Pyz}"\n'
     return ret
 
+
+def make_lammps_elastic(
+    conf, type_map, interaction, param, etol=0, ftol=1e-10, maxiter=5000, maxeval=500000
+):
+    type_map_list = element_list(type_map)
+
+    """
+    make lammps input for elastic calculation
+    """
+    ret = ""
+    ret += "clear\n"
+    ret += "units 	metal\n"
+    ret += "dimension	3\n"
+    ret += "boundary	p p p\n"
+    ret += "atom_style	atomic\n"
+    if param["type"] == "mace":
+        ret += "atom_modify map yes\n"
+        ret += "newton on\n"
+    ret += "box         tilt large\n"
+    ret += "read_data   %s\n" % conf
+    for ii in range(len(type_map)):
+        ret += "mass            %d %.3f\n" % (ii + 1, Element(type_map_list[ii]).mass)
+    ret += "neigh_modify    every 1 delay 0 check no\n"
+    ret += interaction(param)
+    ret += "compute         mype all pe\n"
+    ret += "thermo          100\n"
+    ret += (
+        "thermo_style    custom step pe pxx pyy pzz pxy pxz pyz lx ly lz vol c_mype\n"
+    )
+    ret += "dump            1 all custom 100 dump.relax id type xs ys zs fx fy fz\n"
+    ret += "min_style       cg\n"
+    ret += "minimize        %e %e %d %d\n" % (etol, ftol, maxiter, maxeval)
+    ret += "variable        N equal count(all)\n"
+    ret += "variable        V equal vol\n"
+    ret += 'variable        E equal "c_mype"\n'
+    ret += "variable        Pxx equal pxx\n"
+    ret += "variable        Pyy equal pyy\n"
+    ret += "variable        Pzz equal pzz\n"
+    ret += "variable        Pxy equal pxy\n"
+    ret += "variable        Pxz equal pxz\n"
+    ret += "variable        Pyz equal pyz\n"
+    ret += "variable        Epa equal ${E}/${N}\n"
+    ret += "variable        Vpa equal ${V}/${N}\n"
+    ret += 'print "All done"\n'
+    ret += 'print "Total number of atoms = ${N}"\n'
+    ret += 'print "Final energy per atoms = ${Epa}"\n'
+    ret += 'print "Final volume per atoms = ${Vpa}"\n'
+    ret += 'print "Final Stress (xx yy zz xy xz yz) = ${Pxx} ${Pyy} ${Pzz} ${Pxy} ${Pxz} ${Pyz}"\n'
+    return ret
+
+def make_lammps_FiniteTlatt(conf, type_map, interaction, param):
+    type_map_list = element_list(type_map)
+    deepmd_version = param.get("deepmd_version", None)
+    dump_step = 100
+    # detour sychronizing problem of dumping in new version of deepmd-kit >=2.1.5
+    ret = ""
+    ret += "include  variable_FiniteTlatt.in\n"
+    ret += "clear\n"
+    ret += "units 	metal\n"
+    ret += "dimension	3\n"
+    ret += "boundary	p p p\n"
+    ret += "atom_style	atomic\n"
+    ret += "box         tilt large\n"
+    ret += "read_data   %s\n" % conf
+    ret += "replicate   ${nx} ${ny} ${nz}\n"
+    for ii in range(len(type_map)):
+        ret += "mass            %d %.3f\n" % (ii + 1, Element(type_map_list[ii]).mass)
+    ret += "neigh_modify    every 1 delay 0 check no\n"
+    ret += interaction(param)
+    ret += "compute         mype all pe\n"
+    ret += "thermo          100\n"
+    ret += (
+        "thermo_style    custom step pe pxx pyy pzz pxy pxz pyz lx ly lz vol c_mype\n"
+    )
+    ret += "velocity all create ${temperature} 12345 mom yes rot yes dist gaussian\n"
+    ret += f"fix 1 all npt temp ${{temperature}} ${{temperature}} ${{tdamp}} aniso 0.0 0.0 ${{pdamp}}\n"
+    ret += "run ${equi_step}\n"
+    ret += "reset_timestep 0 \n"
+    ret += f"dump            1 all custom  {dump_step} dump.relax id type xs ys zs fx fy fz\n"
+    ret += "variable lx equal lx \n"
+    ret += "variable ly equal ly \n"
+    ret += "variable lz equal lz \n"
+    ret += "fix 2 all ave/time ${N_every} ${N_repeat} ${N_freq}  v_lx v_ly v_lz  ave running file average_box.txt\n"
+    ret += "run ${ave_step} \n"
+    ret += "variable        N equal count(all)\n"
+    ret += "variable        V equal vol\n"
+    ret += "variable        E equal \"c_mype\"\n"
+    ret += "variable        tmplx equal lx\n"
+    ret += "variable        tmply equal ly\n"
+    ret += "variable        Pxx equal pxx\n"
+    ret += "variable        Pyy equal pyy\n"
+    ret += "variable        Pzz equal pzz\n"
+    ret += "variable        Pxy equal pxy\n"
+    ret += "variable        Pxz equal pxz\n"
+    ret += "variable        Pyz equal pyz\n"
+    ret += "variable        Epa equal ${E}/${N}\n"
+    ret += "variable        Vpa equal ${V}/${N}\n"
+    ret += "variable        AA equal (${tmplx}*${tmply})\n"
+    ret += "print \"All done\"\n"
+    ret += "print \"Total number of atoms = ${N}\"\n"
+    ret += "print \"Final energy per atoms = ${Epa}\"\n"
+    ret += "print \"Final volume per atoms = ${Vpa}\"\n"
+    ret += "print \"Final Base area = ${AA}\"\n"
+    ret += "print \"Final Stress (xx yy zz xy xz yz) = ${Pxx} ${Pyy} ${Pzz} ${Pxy} ${Pxz} ${Pyz}\"\n"
+    ret += "print \"Final Length (box_x box_y box_z) = ${lx} ${ly} ${lz}\"\n"
+    return ret
 
 def make_lammps_press_relax(
     conf,
@@ -443,7 +547,6 @@ def make_lammps_press_relax(
     ret += "minimize        %e %e %d %d\n" % (etol, ftol, maxiter, maxeval)
     ret += "fix             1 all box/relax aniso ${Px} \n"
     ret += "minimize        %e %e %d %d\n" % (etol, ftol, maxiter, maxeval)
-    ret += "write_dump      all custom dump.relax id type xs ys zs fx fy fz modify sort id\n"
     ret += "variable        N equal count(all)\n"
     ret += "variable        V equal vol\n"
     ret += 'variable        E equal "c_mype"\n'

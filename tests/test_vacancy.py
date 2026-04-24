@@ -10,7 +10,7 @@ from pymatgen.core import Structure
 from pymatgen.io.vasp import Incar
 from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 
-from apex.core.property.Vacancy.vasp import Vacancy
+from apex.core.property.Vacancy import Vacancy
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 __package__ = "tests"

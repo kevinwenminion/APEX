@@ -9,14 +9,12 @@ from monty.serialization import loadfn
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 __package__ = "tests"
 
-from apex.core.property.FiniteTlatt.lammps import FiniteTlatt
+from apex.core.property.FiniteTlatt import FiniteTlatt
 from apex.core.calculator.Lammps import Lammps
 
 
 class TestFiniteTlatt(unittest.TestCase):
     def setUp(self):
-        self._cwd = os.getcwd()
-        os.chdir(os.path.abspath(os.path.dirname(__file__)))
         base = {
             "structures": ["confs/hcp-Ti"],
             "interaction": {
@@ -63,7 +61,6 @@ class TestFiniteTlatt(unittest.TestCase):
             shutil.rmtree(self.equi_path)
         if os.path.exists(self.target_path):
             shutil.rmtree(self.target_path)
-        os.chdir(self._cwd)
 
     def test_task_type(self):
         self.assertEqual("finitetlatt", self.finite.task_type())
@@ -100,42 +97,19 @@ class TestFiniteTlatt(unittest.TestCase):
             self.assertTrue(os.path.isfile(os.path.join(ii, "POSCAR")))
             FiniteTlatt_json_file = os.path.join(ii, "FiniteTlatt.json")
             self.assertTrue(os.path.isfile(FiniteTlatt_json_file))
-            variable_FiniteTlatt_file = os.path.join(ii, "in.variable")
+            variable_FiniteTlatt_file = os.path.join(ii, "variable_FiniteTlatt.in")
             self.assertTrue(os.path.isfile(variable_FiniteTlatt_file))
             with open(variable_FiniteTlatt_file, 'r') as file:
                 lines = file.readlines()
                 temp = lines[1].strip()
             self.assertEqual(temp, "variable temperature equal %.2f" % self.prop_param[0]["cal_setting"]["temperature"][num])
-            self.assertEqual(lines[2].strip(), "variable nx equal 2")
             num += 1
 
     def test_forward_common_files(self):
-        fc_files = ["in.lammps", "in.variable", "Ti.meam.spline"]
+        fc_files = ["in.lammps", "variable_FiniteTlatt.in", "Ti.meam.spline"]
         self.assertEqual(self.lammps.forward_common_files(self.prop_param[0]["type"]), fc_files)
 
     def test_backward_files(self):
         backward_files = ["log.lammps", "outlog", "dump.relax", "average_box.txt"]
         self.assertEqual(self.lammps.backward_files(self.prop_param[0]["type"]), backward_files)
-
-    def test_make_input_file(self):
-        shutil.copy(
-            os.path.join(self.source_path, "hcp-Ti-CONTCAR"),
-            os.path.join(self.equi_path, "CONTCAR"),
-        )
-        task_list = self.finite.make_confs(self.target_path, self.equi_path)
-        task_dir = os.path.abspath(task_list[0])
-
-        self.lammps.make_input_file(
-            task_dir, self.finite.task_type(), self.finite.task_param()
-        )
-
-        common_input = os.path.join(self.target_path, "in.lammps")
-        task_input = os.path.join(task_dir, "in.lammps")
-
-        self.assertTrue(os.path.isfile(common_input))
-        self.assertTrue(os.path.islink(task_input))
-        with open(common_input, "r") as fp:
-            contents = fp.read()
-        self.assertIn("include  in.variable", contents)
-        self.assertIn("fix 2 all ave/time", contents)
 

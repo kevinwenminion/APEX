@@ -7,7 +7,7 @@ import unittest
 from pymatgen.core import Structure
 from pymatgen.io.vasp import Incar
 
-from apex.core.property.Elastic.vasp import Elastic
+from apex.core.property.Elastic import Elastic
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 __package__ = "tests"

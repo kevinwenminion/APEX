@@ -7,7 +7,7 @@ import unittest
 from pymatgen.core.structure import Structure
 from pymatgen.io.vasp import Incar
 
-from apex.core.property.Gamma.vasp import Gamma
+from apex.core.property.Gamma import Gamma
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 __package__ = "tests"
@@ -15,8 +15,6 @@ __package__ = "tests"
 
 class TestGamma(unittest.TestCase):
     def setUp(self):
-        self._cwd = os.getcwd()
-        os.chdir(os.path.abspath(os.path.dirname(__file__)))
         _jdata = {
             "structures": ["confs/std-fcc"],
             "interaction": {
@@ -69,7 +67,6 @@ class TestGamma(unittest.TestCase):
             os.remove(self.res_data)
         if os.path.exists(self.ptr_data):
             os.remove(self.ptr_data)
-        os.chdir(self._cwd)
 
     def test_task_type(self):
         self.assertEqual("gamma", self.gamma.task_type())
