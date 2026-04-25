@@ -92,6 +92,22 @@ class TestFlowModule(unittest.TestCase):
                 path=expected_path,
             )
 
+    def test_download_artifact_with_retry_recovers_from_transient_error(self):
+        with mock.patch(
+                "apex.flow.download_artifact",
+                side_effect=[RuntimeError("connection broken"), "downloaded"],
+        ) as mocked_download, mock.patch("apex.flow.time.sleep") as mocked_sleep:
+            result = FlowGenerator._download_artifact_with_retry(
+                artifact="remote-artifact",
+                path="/tmp/out",
+                retries=2,
+                delay=1,
+            )
+
+        self.assertEqual(result, "downloaded")
+        self.assertEqual(mocked_download.call_count, 2)
+        mocked_sleep.assert_called_once_with(1)
+
     def test_download_step_main_logs_falls_back_to_child_relaxmake(self):
         fg = self._make_flow_generator()
 

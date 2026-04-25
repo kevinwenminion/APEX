@@ -3,6 +3,7 @@ import sys
 import os
 import glob
 import shutil
+import tempfile
 from pathlib import Path
 from dflow.python import (
     OP,
@@ -13,7 +14,7 @@ from dflow.python import (
 )
 from monty.serialization import loadfn
 
-from apex.op.relaxation_ops import RelaxMake
+from apex.op.relaxation_ops import RelaxMake, _check_relaxation_outputs
 from apex.op.property_ops import PropsMake
 try:
     from context import write_poscar
@@ -90,6 +91,32 @@ class TestMakeRelaxOPs(unittest.TestCase):
         self.assertTrue(os.path.exists(self.lammps_dir/'confs'))
         self.assertTrue(os.path.exists(self.lammps_dir/'confs/std-bcc/relaxation/relax_task'))
         self.assertEqual(out['task_paths'], [self.lammps_dir/'confs/std-bcc/relaxation/relax_task'])
+
+    def test_check_relaxation_outputs_accepts_complete_task(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            task_dir = Path(tmpdir) / "conf" / "relaxation" / "relax_task"
+            task_dir.mkdir(parents=True)
+            (task_dir / "CONTCAR").write_text("ok")
+            (task_dir / "result.json").write_text("{}")
+
+            _check_relaxation_outputs([str(Path(tmpdir) / "conf")])
+
+    def test_check_relaxation_outputs_reports_lammps_failure_marker(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            task_dir = Path(tmpdir) / "conf" / "relaxation" / "relax_task"
+            task_dir.mkdir(parents=True)
+            (task_dir / "apex_lammps_failed.json").write_text("{}")
+
+            with self.assertRaisesRegex(RuntimeError, "LAMMPS failed"):
+                _check_relaxation_outputs([str(Path(tmpdir) / "conf")])
+
+    def test_check_relaxation_outputs_reports_missing_contcar(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            task_dir = Path(tmpdir) / "conf" / "relaxation" / "relax_task"
+            task_dir.mkdir(parents=True)
+
+            with self.assertRaisesRegex(RuntimeError, "missing CONTCAR"):
+                _check_relaxation_outputs([str(Path(tmpdir) / "conf")])
 
 
 class TestMakePropsOPs(unittest.TestCase):
@@ -186,5 +213,4 @@ class TestMakePropsOPs(unittest.TestCase):
             len(out['task_paths']),
             self._expected_eos_task_count(param['properties'][0])
         )
-
 

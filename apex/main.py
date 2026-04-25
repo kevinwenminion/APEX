@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import datetime
+import time
 from typing import List
 
 from dflow import (
@@ -664,6 +665,75 @@ def get_id_from_record(work_dir: os.PathLike, operation_name: str = None) -> str
     return workflow_id
 
 
+def _format_workflow_query_error(wf_id: str, exc: Exception) -> str | None:
+    text = str(exc)
+    lower_text = text.lower()
+    status = getattr(exc, "status", None)
+    is_not_found = (
+        status == 404
+        or "(404)" in text
+        or "reason: not found" in lower_text
+        or '"not found"' in lower_text
+    )
+    is_workflow_query = (
+        "workflow" in lower_text
+        and ("not found" in lower_text or str(wf_id) in text)
+    )
+    if not (is_not_found and is_workflow_query):
+        return None
+
+    return (
+        f"Workflow {wf_id!r} was not found by dflow/Argo.\n"
+        "The workflow may have been deleted, may not have been archived, or the "
+        "current config may point to a different dflow host/project/namespace.\n"
+        "Check the workflow ID in .workflow.log or pass the expected ID with -i. "
+        "If the ID is correct, verify the -c config file uses the same Bohrium/"
+        "dflow account and project that submitted the workflow."
+    )
+
+
+def _query_keys_of_steps_or_exit(wf: Workflow, wf_id: str) -> List[str]:
+    try:
+        return wf.query_keys_of_steps()
+    except Exception as exc:
+        message = _format_workflow_query_error(wf_id, exc)
+        if message:
+            raise SystemExit(message) from None
+        raise
+
+
+def _query_workflow_or_exit(wf: Workflow, wf_id: str):
+    try:
+        return wf.query()
+    except Exception as exc:
+        message = _format_workflow_query_error(wf_id, exc)
+        if message:
+            raise SystemExit(message) from None
+        raise
+
+
+def _download_artifact_with_retry(artifact, path, retries: int = 3, delay: int = 10):
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            return download_artifact(artifact=artifact, path=path)
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= retries:
+                break
+            logging.warning(
+                "Artifact download failed (%s/%s): %s. Retrying in %ss...",
+                attempt,
+                retries,
+                exc,
+                delay,
+            )
+            time.sleep(delay)
+    raise RuntimeError(
+        f"Artifact download failed after {retries} attempt(s): {last_exc}"
+    ) from last_exc
+
+
 def _safe_get(obj, key, default=None):
     if isinstance(obj, dict):
         return obj.get(key, default)
@@ -737,7 +807,7 @@ def _download_failure_artifacts_for_step(wf_info, root_step, key, work_dir):
             )
             os.makedirs(target_dir, exist_ok=True)
             try:
-                download_artifact(artifact=artifact, path=target_dir)
+                _download_artifact_with_retry(artifact=artifact, path=target_dir)
                 downloaded += 1
             except Exception as exc:
                 logging.warning(
@@ -790,7 +860,7 @@ def main():
         if not wf_id:
             wf_id = get_id_from_record(args.work, 'get')
         wf = Workflow(id=wf_id)
-        info = wf.query()
+        info = _query_workflow_or_exit(wf, wf_id)
         t = []
         t.append(["Name:", info.id])
         t.append(["Status:", info.status.phase])
@@ -830,10 +900,16 @@ def main():
         if type is not None:
             type = type.split(",")
         wf = Workflow(id=wf_id)
-        if key is not None:
-            steps = wf.query_step_by_key(key, name, phase, id, type)
-        else:
-            steps = wf.query_step(name, key, phase, id, type)
+        try:
+            if key is not None:
+                steps = wf.query_step_by_key(key, name, phase, id, type)
+            else:
+                steps = wf.query_step(name, key, phase, id, type)
+        except Exception as exc:
+            message = _format_workflow_query_error(wf_id, exc)
+            if message:
+                raise SystemExit(message) from None
+            raise
         for step in steps:
             if step.type in ["StepGroup"]:
                 continue
@@ -873,7 +949,7 @@ def main():
         if not wf_id:
             wf_id = get_id_from_record(args.work, 'getkeys')
         wf = Workflow(id=wf_id)
-        keys = wf.query_keys_of_steps()
+        keys = _query_keys_of_steps_or_exit(wf, wf_id)
         print("\n".join(keys))
     elif args.cmd == "delete":
         config_dflow(args.config)
@@ -940,8 +1016,8 @@ def main():
             wf_id = get_id_from_record(args.work, 'retrieve')
         wf = Workflow(id=wf_id)
         work_dir = args.work
-        all_keys = wf.query_keys_of_steps()
-        wf_info = wf.query()
+        all_keys = _query_keys_of_steps_or_exit(wf, wf_id)
+        wf_info = _query_workflow_or_exit(wf, wf_id)
         download_keys = [key for key in all_keys if key.split('-')[0] == 'propertycal' or key == 'relaxationcal']
         task_left = len(download_keys)
         print(f'Retrieving {task_left} workflow results {wf_id} to {work_dir}')
@@ -953,7 +1029,7 @@ def main():
             if phase == 'Succeeded':
                 logging.info(f"Retrieving {key}...({task_left} more left)")
                 try:
-                    download_artifact(
+                    _download_artifact_with_retry(
                         artifact=step.outputs.artifacts['retrieve_path'],
                         path=work_dir
                     )

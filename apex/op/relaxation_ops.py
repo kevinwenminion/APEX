@@ -14,6 +14,27 @@ from apex.utils import recursive_search
 upload_packages.append(__file__)
 
 
+def _check_relaxation_outputs(conf_dirs: List[str]) -> None:
+    failed = []
+    for conf_dir in conf_dirs:
+        task_dir = os.path.join(conf_dir, "relaxation", "relax_task")
+        marker = os.path.join(task_dir, "apex_lammps_failed.json")
+        contcar = os.path.join(task_dir, "CONTCAR")
+        result = os.path.join(task_dir, "result.json")
+        if os.path.isfile(marker):
+            failed.append(f"{task_dir} (LAMMPS failed; see apex_lammps_failed.json and log.lammps)")
+        elif not os.path.isfile(contcar):
+            failed.append(f"{task_dir} (missing CONTCAR)")
+        elif not os.path.isfile(result):
+            failed.append(f"{task_dir} (missing result.json)")
+    if failed:
+        raise RuntimeError(
+            "Relaxation failed or did not produce required output for task(s): "
+            + "; ".join(failed)
+            + ". Property steps require relaxation/relax_task/CONTCAR."
+        )
+
+
 class RelaxMake(OP):
     """
     OP class for making calculation tasks
@@ -140,6 +161,7 @@ class RelaxPost(OP):
                 conf_dirs.extend(glob.glob(conf))
             conf_dirs = list(set(conf_dirs))
             conf_dirs.sort()
+            _check_relaxation_outputs(conf_dirs)
 
             # remove potential files
             inter_files_name = []

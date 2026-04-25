@@ -5,10 +5,17 @@ import os
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
+import apex.gui as gui_module
 from apex.gui import (
+    DEFAULT_REPORT_PORT,
+    BLOCKED_INLINE_COMMANDS,
+    RETRIEVE_RUNNING_MESSAGE,
+    _advanced_report_args,
     _autodetect_interaction_rows,
     _build_param_payload,
+    _build_submit_shell_command,
     _cleanup_reset_logs,
     _ensure_default_interaction_files,
     _extract_property_types,
@@ -22,12 +29,16 @@ from apex.gui import (
     _list_workdir_file_options,
     _load_account_state,
     _load_profile_param_template,
+    _patch_param_payload,
     _parse_submit_payloads,
     _read_latest_workflow_id,
     _render_account_summary,
+    _finalize_retrieve_status,
+    _run_finalize_pipeline,
     _save_uploaded_files,
     _save_account_overwrite,
     _strip_parenthetical_suffix,
+    _summarize_conf_progress,
     _summarize_step_progress,
 )
 
@@ -76,6 +87,93 @@ class TestGuiSubmitBuilder(unittest.TestCase):
         self.assertNotIn("model", payload["interaction"])
         self.assertEqual(payload["interaction"]["type_map"], "auto")
 
+    def test_patch_param_payload_updates_structures_without_resetting_manual_edits(self):
+        template = _load_profile_param_template("lammps")
+        current = {
+            "structures": ["old/conf"],
+            "relaxation": {"cal_setting": {"custom_relax": True}},
+            "properties": [{"type": "eos", "req_calc": True, "custom": 123}],
+            "interaction": {"type": "eam_alloy", "model": "manual.eam", "type_map": "auto"},
+            "manual_top_level": {"keep": True},
+        }
+
+        payload = _patch_param_payload(
+            current_text=json.dumps(current),
+            triggered_id="submit-structures",
+            profile="lammps",
+            template=template,
+            relax_check=["relax"],
+            properties_check=["eos"],
+            structures_value=["RSS_HEA/conf_*"],
+            interaction_type="eam_alloy",
+            interaction_model="new.eam",
+            interaction_incar="",
+            interaction_rows=[],
+        )
+
+        self.assertEqual(payload["structures"], ["RSS_HEA/conf_*"])
+        self.assertEqual(payload["properties"], current["properties"])
+        self.assertEqual(payload["interaction"], current["interaction"])
+        self.assertEqual(payload["manual_top_level"], {"keep": True})
+
+    def test_patch_param_payload_updates_properties_without_resetting_interaction(self):
+        template = _load_profile_param_template("lammps")
+        current = {
+            "structures": ["confs/std-bcc"],
+            "properties": [{"type": "eos", "req_calc": False, "custom": 123}],
+            "interaction": {"type": "eam_alloy", "model": "manual.eam", "type_map": "auto"},
+        }
+
+        payload = _patch_param_payload(
+            current_text=json.dumps(current),
+            triggered_id="submit-properties-check",
+            profile="lammps",
+            template=template,
+            relax_check=[],
+            properties_check=["eos"],
+            structures_value=["ignored/conf"],
+            interaction_type="deepmd",
+            interaction_model="ignored.pb",
+            interaction_incar="",
+            interaction_rows=[],
+        )
+
+        self.assertEqual(payload["structures"], ["confs/std-bcc"])
+        self.assertEqual(payload["interaction"], current["interaction"])
+        self.assertEqual(payload["properties"][0]["type"], "eos")
+        self.assertTrue(payload["properties"][0]["req_calc"])
+        self.assertEqual(payload["properties"][0]["custom"], 123)
+
+    def test_patch_param_payload_updates_interaction_without_resetting_other_blocks(self):
+        template = _load_profile_param_template("lammps")
+        current = {
+            "structures": ["confs/std-bcc"],
+            "relaxation": {"cal_setting": {"custom_relax": True}},
+            "properties": [{"type": "elastic", "req_calc": True, "custom": "keep"}],
+            "interaction": {"type": "eam_alloy", "model": "old.eam", "type_map": "auto"},
+        }
+
+        payload = _patch_param_payload(
+            current_text=json.dumps(current),
+            triggered_id="submit-interaction-model",
+            profile="lammps",
+            template=template,
+            relax_check=["relax"],
+            properties_check=["eos"],
+            structures_value=["ignored/conf"],
+            interaction_type="deepmd",
+            interaction_model="model.pb",
+            interaction_incar="",
+            interaction_rows=[],
+        )
+
+        self.assertEqual(payload["structures"], current["structures"])
+        self.assertEqual(payload["relaxation"], current["relaxation"])
+        self.assertEqual(payload["properties"], current["properties"])
+        self.assertEqual(payload["interaction"]["type"], "deepmd")
+        self.assertEqual(payload["interaction"]["model"], "model.pb")
+        self.assertEqual(payload["interaction"]["type_map"], "auto")
+
     def test_parse_extra_elements(self):
         parsed = _parse_extra_elements("Cu, Ni Fe;Cr\nMn")
         self.assertEqual(parsed, ["Cu", "Ni", "Fe", "Cr", "Mn"])
@@ -90,6 +188,13 @@ class TestGuiSubmitBuilder(unittest.TestCase):
             self.assertIn("models/Ni.eam.alloy", values)
             self.assertEqual(values[0], "missing.pb")
 
+    def test_gui_submit_command_uses_submit_only(self):
+        shell_cmd, display_cmd = _build_submit_shell_command("param.json", "global.json")
+
+        self.assertIn(" submit ", shell_cmd)
+        self.assertIn(" -s", shell_cmd)
+        self.assertIn(" -s", display_cmd)
+
     def test_list_structure_path_options_returns_structure_dirs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             os.makedirs(os.path.join(tmpdir, "confs", "std-bcc"), exist_ok=True)
@@ -99,6 +204,26 @@ class TestGuiSubmitBuilder(unittest.TestCase):
             values = [item["value"] for item in options]
             self.assertIn("confs/std-bcc", values)
             self.assertEqual(values[0], "confs/std-*")
+
+    def test_list_structure_path_options_adds_numbered_wildcard_group(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for name in ["conf_001", "conf_002"]:
+                conf_dir = os.path.join(tmpdir, "RSS_HEA", name)
+                os.makedirs(conf_dir, exist_ok=True)
+                with open(os.path.join(conf_dir, "POSCAR"), "w", encoding="utf-8") as f:
+                    f.write("POSCAR")
+            single_dir = os.path.join(tmpdir, "other", "case_001")
+            os.makedirs(single_dir, exist_ok=True)
+            with open(os.path.join(single_dir, "POSCAR"), "w", encoding="utf-8") as f:
+                f.write("POSCAR")
+
+            options = _list_structure_path_options(tmpdir)
+            values = [item["value"] for item in options]
+
+            self.assertIn("RSS_HEA/conf_*", values)
+            self.assertIn("RSS_HEA/conf_001", values)
+            self.assertIn("RSS_HEA/conf_002", values)
+            self.assertNotIn("other/case_*", values)
 
     def test_build_param_payload_ignores_manual_elements_for_auto_type_map(self):
         payload = _build_param_payload(
@@ -301,6 +426,106 @@ class TestGuiSubmitBuilder(unittest.TestCase):
                 f.write("wf-new\tretrieve\t2026-01-01T00:00:01\t/tmp/new\n")
             self.assertEqual(_read_latest_workflow_id(tmpdir), "wf-new")
 
+    def test_advanced_report_is_allowed_and_gets_separate_port(self):
+        self.assertNotIn("report", BLOCKED_INLINE_COMMANDS)
+        args = _advanced_report_args(["report", "-c", "global.json", "-w", "."])
+
+        self.assertIn("--no-browser", args)
+        self.assertEqual(args[-2:], ["--port", str(DEFAULT_REPORT_PORT)])
+
+    def test_advanced_report_keeps_explicit_port(self):
+        args = _advanced_report_args(["report", "-c", "global.json", "--port", "8090"])
+
+        self.assertIn("--no-browser", args)
+        self.assertEqual(args.count("--port"), 1)
+        self.assertIn("8090", args)
+
+    def test_finalize_pipeline_retrieves_and_reports_without_archive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            commands = []
+
+            def fake_run_apex_command(arguments, cwd=None):
+                commands.append(arguments)
+                self.assertEqual(cwd, tmpdir)
+                if arguments[0] == "retrieve":
+                    with open(os.path.join(tmpdir, "all_result.json"), "w", encoding="utf-8") as f:
+                        f.write("{}")
+                    return {"ok": True, "message": "retrieved"}
+                if arguments[0] == "archive":
+                    self.fail("finalize pipeline must not run archive")
+                return {"ok": False, "message": "unexpected command"}
+
+            def fake_run_report_in_background(config_file, report_target, cwd):
+                self.assertEqual(config_file, "global.json")
+                self.assertEqual(report_target, tmpdir)
+                self.assertEqual(cwd, tmpdir)
+                return {"ok": True, "message": "report started"}
+
+            with mock.patch.object(gui_module, "_run_apex_command", side_effect=fake_run_apex_command), \
+                    mock.patch.object(gui_module, "_run_report_in_background", side_effect=fake_run_report_in_background):
+                feedback = _run_finalize_pipeline(
+                    workdir=tmpdir,
+                    workflow_id="wf-new",
+                    global_file="global.json",
+                )
+
+            self.assertTrue(feedback["ok"])
+            self.assertEqual(commands, [["retrieve", "-i", "wf-new", "-w", tmpdir, "-c", "global.json"]])
+            self.assertIn("Retrieve + report completed", feedback["message"])
+
+    def test_finalize_retrieve_status_reports_running_message(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = {
+                "workdir": tmpdir,
+                "global_file": "global.json",
+                "retrieve": {
+                    "status": "running",
+                    "workdir": tmpdir,
+                    "global_file": "global.json",
+                    "status_file": os.path.join(tmpdir, ".apex-retrieve.status"),
+                    "log_file": os.path.join(tmpdir, "apex-retrieve.log"),
+                },
+            }
+
+            value, label, animated, text, next_state, feedback = _finalize_retrieve_status(state)
+
+            self.assertEqual(value, 50)
+            self.assertEqual(label, "Retrieving")
+            self.assertTrue(animated)
+            self.assertEqual(text, RETRIEVE_RUNNING_MESSAGE)
+            self.assertEqual(next_state["status"], "running")
+            self.assertIs(feedback, gui_module.dash.no_update)
+
+    def test_finalize_retrieve_status_starts_report_after_success(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            status_file = os.path.join(tmpdir, ".apex-retrieve.status")
+            with open(status_file, "w", encoding="utf-8") as f:
+                f.write("0")
+            with open(os.path.join(tmpdir, "all_result.json"), "w", encoding="utf-8") as f:
+                f.write("{}")
+            state = {
+                "workdir": tmpdir,
+                "global_file": "global.json",
+                "retrieve": {
+                    "status": "running",
+                    "workdir": tmpdir,
+                    "global_file": "global.json",
+                    "status_file": status_file,
+                    "log_file": os.path.join(tmpdir, "apex-retrieve.log"),
+                    "command": "apex retrieve",
+                },
+            }
+
+            with mock.patch.object(gui_module, "_run_report_in_background", return_value={"ok": True, "message": "report started"}):
+                value, label, animated, text, next_state, feedback = _finalize_retrieve_status(state)
+
+            self.assertEqual(value, 100)
+            self.assertEqual(label, "100%")
+            self.assertFalse(animated)
+            self.assertEqual(text, "Retrieve finished; report started.")
+            self.assertEqual(next_state, {})
+            self.assertIn("Retrieve + report completed", feedback["message"])
+
     def test_parse_submit_payloads_rejects_dot_in_structures(self):
         global_text = json.dumps({})
         param_text = json.dumps({"structures": ["."], "interaction": {"type": "eam_alloy"}})
@@ -403,6 +628,45 @@ class TestGuiSubmitBuilder(unittest.TestCase):
         self.assertEqual(summary["total"], 4)
         self.assertEqual(summary["running"], 2)
         self.assertEqual(summary["finished"], 2)
+
+    def test_summarize_conf_progress_groups_property_tasks_by_conf(self):
+        steps = [
+            {
+                "key": "relaxcal-rss-hea-conf-001",
+                "phase": "Succeeded",
+                "inputs": {"parameters": {"flow_id": {"value": "RSS_HEA/conf_001"}}},
+            },
+            {
+                "key": "propertycal-rss-hea-conf-001-eos-00",
+                "phase": "Succeeded",
+                "inputs": {
+                    "parameters": {
+                        "path_to_prop": {"value": "RSS_HEA/conf_001/eos_00"},
+                    }
+                },
+            },
+            {
+                "key": "relaxcal-rss-hea-conf-002",
+                "phase": "Succeeded",
+                "inputs": {"parameters": {"flow_id": {"value": "RSS_HEA/conf_002"}}},
+            },
+            {
+                "key": "propertycal-rss-hea-conf-002-eos-00",
+                "phase": "Running",
+                "inputs": {
+                    "parameters": {
+                        "path_to_prop": {"value": "RSS_HEA/conf_002/eos_00"},
+                    }
+                },
+            },
+        ]
+
+        summary = _summarize_conf_progress(steps)
+
+        self.assertEqual(summary["conf_total"], 2)
+        self.assertEqual(summary["conf_finished"], 1)
+        self.assertEqual(summary["conf_running"], 1)
+        self.assertEqual(summary["conf_failed"], 0)
 
 
 if __name__ == "__main__":
