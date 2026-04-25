@@ -2,6 +2,7 @@
 .DS_Store
 .vscode/
 .idea/
+.github/
 
 # VCS / CI generated
 .workflow.log
