@@ -109,6 +109,17 @@ def _extract_selected_properties(param_template: Dict[str, Any]) -> List[str]:
     return selected
 
 
+def _extract_requested_properties(param_payload: Dict[str, Any]) -> List[str]:
+    selected: List[str] = []
+    for item in param_payload.get("properties", []):
+        if not isinstance(item, dict):
+            continue
+        ptype = item.get("type")
+        if ptype and item.get("req_calc", True) is not False and ptype not in selected:
+            selected.append(ptype)
+    return selected
+
+
 def _extract_structure_defaults(param_template: Dict[str, Any]) -> List[str]:
     structures = param_template.get("structures", [])
     if not isinstance(structures, list):
@@ -1023,6 +1034,56 @@ def _find_param_fallback_file(workdir: str, preferred_files: Optional[List[str]]
     return selected, _read_text_file(_resolve_file_path(target_dir, selected))
 
 
+def _param_controls_from_text(param_text: str, profile: str, workdir: str) -> Optional[Dict[str, Any]]:
+    try:
+        payload = json.loads(param_text or "{}")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    profile = profile if profile in PROFILE_NAMES else DEFAULT_PROFILE
+    structures = _extract_structure_defaults(payload)
+    property_types = _extract_property_types(payload)
+    property_values = _extract_requested_properties(payload)
+    interaction_type, interaction_model, _interaction_elements = _extract_interaction_defaults(payload)
+    interaction_incar = _extract_interaction_incar(payload, profile)
+    interaction_rows = _interaction_table_rows_from_template(profile, payload)
+
+    return {
+        "structures_options": _list_structure_path_options(workdir, structures),
+        "structures_value": structures,
+        "relax_value": ["relax"] if "relaxation" in payload else [],
+        "property_options": [{"label": name, "value": name} for name in property_types],
+        "property_value": property_values,
+        "interaction_type_options": _interaction_type_options_for_profile(profile, interaction_type),
+        "interaction_type": interaction_type,
+        "interaction_model_options": _list_workdir_file_options(workdir, interaction_model),
+        "interaction_model": interaction_model,
+        "interaction_incar": interaction_incar,
+        "interaction_rows": interaction_rows,
+    }
+
+
+def _param_control_output_values(workdir: str, param_text: str, profile: str) -> Tuple[Any, ...]:
+    controls = _param_controls_from_text(param_text, profile, workdir)
+    if not controls:
+        return (dash.no_update,) * 11
+    return (
+        controls["structures_options"],
+        controls["structures_value"],
+        controls["relax_value"],
+        controls["property_options"],
+        controls["property_value"],
+        controls["interaction_type_options"],
+        controls["interaction_type"],
+        controls["interaction_model_options"],
+        controls["interaction_model"],
+        controls["interaction_incar"],
+        controls["interaction_rows"],
+    )
+
+
 def _is_structure_candidate_dir(abs_dir: str) -> bool:
     for marker in ("POSCAR", "CONTCAR", "STRU"):
         if os.path.isfile(os.path.join(abs_dir, marker)):
@@ -1887,8 +1948,33 @@ class ApexGuiApp:
         if not initial_param_file:
             initial_param_file = "param.json"
             initial_param_text = DEFAULT_PARAM_EDITOR_TEXT
-        property_options = [{"label": name, "value": name} for name in DEFAULT_PROPERTY_TYPES]
-        interaction_options = _interaction_type_options_for_profile(DEFAULT_PROFILE, DEFAULT_INTERACTION_TYPE)
+        initial_controls = _param_controls_from_text(initial_param_text, DEFAULT_PROFILE, initial_workdir) or {}
+        initial_property_options = initial_controls.get(
+            "property_options",
+            [{"label": name, "value": name} for name in DEFAULT_PROPERTY_TYPES],
+        )
+        initial_property_values = initial_controls.get("property_value", DEFAULT_SELECTED_PROPERTIES)
+        initial_structures = initial_controls.get("structures_value", DEFAULT_STRUCTURE_PATHS)
+        initial_structure_options = initial_controls.get(
+            "structures_options",
+            _list_structure_path_options(initial_workdir, DEFAULT_STRUCTURE_PATHS),
+        )
+        initial_relax_value = initial_controls.get("relax_value", ["relax"])
+        initial_interaction_type = initial_controls.get("interaction_type", DEFAULT_INTERACTION_TYPE)
+        initial_interaction_options = initial_controls.get(
+            "interaction_type_options",
+            _interaction_type_options_for_profile(DEFAULT_PROFILE, DEFAULT_INTERACTION_TYPE),
+        )
+        initial_interaction_model = initial_controls.get("interaction_model", DEFAULT_INTERACTION_MODEL)
+        initial_interaction_model_options = initial_controls.get(
+            "interaction_model_options",
+            _list_workdir_file_options(initial_workdir, DEFAULT_INTERACTION_MODEL),
+        )
+        initial_interaction_incar = initial_controls.get(
+            "interaction_incar",
+            _extract_interaction_incar(DEFAULT_PARAM_TEMPLATE, DEFAULT_PROFILE),
+        )
+        initial_interaction_rows = initial_controls.get("interaction_rows", DEFAULT_INTERACTION_ROWS)
 
         return dbc.Tab(
             label="Submit",
@@ -1914,7 +2000,7 @@ class ApexGuiApp:
                                 dcc.Checklist(
                                     id="submit-relax-check",
                                     options=[{"label": "启用 relaxation", "value": "relax"}],
-                                    value=["relax"],
+                                    value=initial_relax_value,
                                     inputStyle={"marginRight": "6px", "marginLeft": "10px"},
                                     labelStyle={"display": "inline-block"},
                                 ),
@@ -1922,8 +2008,8 @@ class ApexGuiApp:
                                 dbc.Label("Properties 勾选"),
                                 dcc.Checklist(
                                     id="submit-properties-check",
-                                    options=property_options,
-                                    value=DEFAULT_SELECTED_PROPERTIES,
+                                    options=initial_property_options,
+                                    value=initial_property_values,
                                     inputStyle={"marginRight": "6px", "marginLeft": "10px"},
                                     labelStyle={"display": "inline-block", "marginRight": "12px"},
                                 ),
@@ -1935,8 +2021,8 @@ class ApexGuiApp:
                                         dcc.Dropdown(
                                             id="submit-interaction-type",
                                             clearable=False,
-                                            value=DEFAULT_INTERACTION_TYPE,
-                                            options=interaction_options,
+                                            value=initial_interaction_type,
+                                            options=initial_interaction_options,
                                         ),
                                     ],
                                 ),
@@ -1948,8 +2034,8 @@ class ApexGuiApp:
                                         dbc.Label("interaction.model"),
                                         dcc.Dropdown(
                                             id="submit-interaction-model",
-                                            options=_list_workdir_file_options(os.getcwd(), DEFAULT_INTERACTION_MODEL),
-                                            value=DEFAULT_INTERACTION_MODEL,
+                                            options=initial_interaction_model_options,
+                                            value=initial_interaction_model,
                                             placeholder="选择当前 Workdir 中的模型文件",
                                             clearable=True,
                                             searchable=True,
@@ -1982,7 +2068,7 @@ class ApexGuiApp:
                                         dash_table.DataTable(
                                             id="submit-interaction-table",
                                             columns=_interaction_table_columns_for_profile(DEFAULT_PROFILE),
-                                            data=DEFAULT_INTERACTION_ROWS,
+                                            data=initial_interaction_rows,
                                             editable=True,
                                             row_deletable=True,
                                             style_data_conditional=[
@@ -2011,8 +2097,8 @@ class ApexGuiApp:
                                 dbc.Label("structures"),
                                 dcc.Dropdown(
                                     id="submit-structures",
-                                    options=_list_structure_path_options(os.getcwd(), DEFAULT_STRUCTURE_PATHS),
-                                    value=DEFAULT_STRUCTURE_PATHS,
+                                    options=initial_structure_options,
+                                    value=initial_structures,
                                     placeholder="选择结构目录",
                                     multi=True,
                                     searchable=True,
@@ -2115,7 +2201,7 @@ class ApexGuiApp:
                                         dbc.Label(id="submit-interaction-path-label", children=_interaction_path_label(DEFAULT_PROFILE)),
                                         dbc.Input(
                                             id="submit-interaction-incar",
-                                            value=_extract_interaction_incar(DEFAULT_PARAM_TEMPLATE, DEFAULT_PROFILE),
+                                            value=initial_interaction_incar,
                                             placeholder=_interaction_path_placeholder(DEFAULT_PROFILE),
                                         ),
                                         html.Br(),
@@ -2469,15 +2555,31 @@ class ApexGuiApp:
         @self.app.callback(
             Output("submit-param-file", "value", allow_duplicate=True),
             Output("submit-param-editor", "value", allow_duplicate=True),
+            Output("submit-structures", "options", allow_duplicate=True),
+            Output("submit-structures", "value", allow_duplicate=True),
+            Output("submit-relax-check", "value", allow_duplicate=True),
+            Output("submit-properties-check", "options", allow_duplicate=True),
+            Output("submit-properties-check", "value", allow_duplicate=True),
+            Output("submit-interaction-type", "options", allow_duplicate=True),
+            Output("submit-interaction-type", "value", allow_duplicate=True),
+            Output("submit-interaction-model", "options", allow_duplicate=True),
+            Output("submit-interaction-model", "value", allow_duplicate=True),
+            Output("submit-interaction-incar", "value", allow_duplicate=True),
+            Output("submit-interaction-table", "data", allow_duplicate=True),
             Input("submit-workdir", "value"),
+            State("submit-profile", "value"),
             prevent_initial_call=True,
         )
-        def _load_param_fallback_from_workdir(submit_workdir):
+        def _load_param_fallback_from_workdir(submit_workdir, submit_profile):
             workdir = _normalize_workdir(submit_workdir)
             param_file, param_text = _find_param_fallback_file(workdir)
             if not param_file:
-                return dash.no_update, dash.no_update
-            return param_file, param_text
+                return (dash.no_update,) * 13
+            return (
+                param_file,
+                param_text,
+                *_param_control_output_values(workdir, param_text, submit_profile),
+            )
 
         @self.app.callback(
             Output("submit-param-editor", "value"),
@@ -2957,30 +3059,50 @@ class ApexGuiApp:
             Output("command-result", "data", allow_duplicate=True),
             Output("submit-param-file", "value", allow_duplicate=True),
             Output("submit-param-editor", "value", allow_duplicate=True),
+            Output("submit-structures", "options", allow_duplicate=True),
+            Output("submit-structures", "value", allow_duplicate=True),
+            Output("submit-relax-check", "value", allow_duplicate=True),
+            Output("submit-properties-check", "options", allow_duplicate=True),
+            Output("submit-properties-check", "value", allow_duplicate=True),
+            Output("submit-interaction-type", "options", allow_duplicate=True),
+            Output("submit-interaction-type", "value", allow_duplicate=True),
+            Output("submit-interaction-model", "options", allow_duplicate=True),
+            Output("submit-interaction-model", "value", allow_duplicate=True),
+            Output("submit-interaction-incar", "value", allow_duplicate=True),
+            Output("submit-interaction-table", "data", allow_duplicate=True),
             Input("submit-file-upload", "contents"),
             State("submit-file-upload", "filename"),
             State("submit-workdir", "value"),
+            State("submit-profile", "value"),
             prevent_initial_call=True,
         )
-        def _handle_file_upload(upload_contents, upload_filenames, submit_workdir):
+        def _handle_file_upload(upload_contents, upload_filenames, submit_workdir, submit_profile):
             workdir = _normalize_workdir(submit_workdir)
             try:
                 saved_files = _save_uploaded_files(upload_contents, upload_filenames, workdir, target_subdir="")
             except Exception as exc:
-                return _build_feedback(f"File upload failed: {exc}"), dash.no_update, dash.no_update
+                return (_build_feedback(f"File upload failed: {exc}"),) + (dash.no_update,) * 13
 
             if not saved_files:
-                return _build_feedback("No uploaded files received."), dash.no_update, dash.no_update
+                return (_build_feedback("No uploaded files received."),) + (dash.no_update,) * 13
 
             param_file, param_text = _find_param_fallback_file(workdir, preferred_files=saved_files)
             param_message = ""
             if param_file:
                 param_message = f" Using {param_file} as submit parameter file."
 
-            return _build_feedback(
+            feedback = _build_feedback(
                 f"Uploaded {len(saved_files)} file(s) to {workdir}: " + ", ".join(saved_files) + param_message,
                 ok=True,
-            ), (param_file or dash.no_update), (param_text or dash.no_update)
+            )
+            if not param_file:
+                return (feedback,) + (dash.no_update,) * 13
+            return (
+                feedback,
+                param_file,
+                param_text,
+                *_param_control_output_values(workdir, param_text, submit_profile),
+            )
 
         @self.app.callback(
             Output("manage-log-content", "children"),

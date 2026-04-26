@@ -32,6 +32,7 @@ from apex.gui import (
     _list_workdir_file_options,
     _load_account_state,
     _load_profile_param_template,
+    _param_controls_from_text,
     _patch_param_payload,
     _parse_retrieve_progress_from_log,
     _parse_submit_payloads,
@@ -646,6 +647,34 @@ class TestGuiSubmitBuilder(unittest.TestCase):
             self.assertTrue(_is_param_fallback_filename("param_joint.json"))
             self.assertTrue(_is_param_fallback_filename("my_param.json"))
             self.assertFalse(_is_param_fallback_filename("global.json"))
+
+    def test_param_controls_from_text_syncs_form_defaults(self):
+        payload = {
+            "structures": ["RSS_HEA/conf_*"],
+            "relaxation": {"cal_setting": {}},
+            "properties": [
+                {"type": "eos", "req_calc": True},
+                {"type": "elastic", "req_calc": False},
+                {"type": "phonon"},
+            ],
+            "interaction": {
+                "type": "deepmd",
+                "model": ["frozen_model.pb", "other.pb"],
+                "type_map": "auto",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            controls = _param_controls_from_text(json.dumps(payload), "lammps", tmpdir)
+
+        self.assertEqual(controls["structures_value"], ["RSS_HEA/conf_*"])
+        self.assertEqual(controls["relax_value"], ["relax"])
+        self.assertEqual(
+            [item["value"] for item in controls["property_options"]],
+            ["eos", "elastic", "phonon"],
+        )
+        self.assertEqual(controls["property_value"], ["eos", "phonon"])
+        self.assertEqual(controls["interaction_type"], "deepmd")
+        self.assertEqual(controls["interaction_model"], "frozen_model.pb, other.pb")
 
     def test_save_uploaded_files_creates_confs_and_nested_paths(self):
         payload = base64.b64encode(b"POSCAR\n").decode("ascii")
