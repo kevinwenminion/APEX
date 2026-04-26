@@ -33,6 +33,7 @@ BLOCKED_INLINE_COMMANDS = {"gui"}
 DEFAULT_SUBMIT_COMMAND = "nohup apex submit param.json -c global.json > apex.log 2>&1 &"
 SUBMIT_STATUS_FILE = ".apex-submit.status"
 SUBMIT_RUNNING_NOTICE = "任务已提交，正在运行，详情请转到Log页面查看"
+PARAM_FALLBACK_PATTERN = "*param*.json"
 WORKFLOW_PROGRESS_QUERY_TIMEOUT_SECONDS = 8
 WORKFLOW_QUICK_QUERY_TIMEOUT_SECONDS = 5
 WORKFLOW_DETAIL_REFRESH_SECONDS = 30
@@ -987,6 +988,41 @@ def _list_workdir_file_options(workdir: str, current_value: str = "") -> List[Di
     return options
 
 
+def _is_param_fallback_filename(path: str) -> bool:
+    name = os.path.basename(path or "")
+    return "param" in name and name.endswith(".json")
+
+
+def _read_text_file(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def _find_param_fallback_file(workdir: str, preferred_files: Optional[List[str]] = None) -> Tuple[str, str]:
+    target_dir = _normalize_workdir(workdir)
+    candidates: List[str] = []
+
+    for rel_path in preferred_files or []:
+        clean_rel = str(rel_path or "").replace("\\", "/").strip("/")
+        if not _is_param_fallback_filename(clean_rel):
+            continue
+        abs_path = _resolve_file_path(target_dir, clean_rel)
+        if os.path.isfile(abs_path):
+            candidates.append(clean_rel)
+
+    if not candidates and os.path.isdir(target_dir):
+        for abs_path in glob.glob(os.path.join(target_dir, PARAM_FALLBACK_PATTERN)):
+            if os.path.isfile(abs_path):
+                candidates.append(os.path.basename(abs_path))
+
+    if not candidates:
+        return "", ""
+
+    unique_candidates = sorted(set(candidates), key=lambda rel: (-os.path.getmtime(_resolve_file_path(target_dir, rel)), rel))
+    selected = unique_candidates[0]
+    return selected, _read_text_file(_resolve_file_path(target_dir, selected))
+
+
 def _is_structure_candidate_dir(abs_dir: str) -> bool:
     for marker in ("POSCAR", "CONTCAR", "STRU"):
         if os.path.isfile(os.path.join(abs_dir, marker)):
@@ -1846,6 +1882,11 @@ class ApexGuiApp:
 
     @staticmethod
     def _build_submit_tab() -> dbc.Tab:
+        initial_workdir = os.getcwd()
+        initial_param_file, initial_param_text = _find_param_fallback_file(initial_workdir)
+        if not initial_param_file:
+            initial_param_file = "param.json"
+            initial_param_text = DEFAULT_PARAM_EDITOR_TEXT
         property_options = [{"label": name, "value": name} for name in DEFAULT_PROPERTY_TYPES]
         interaction_options = _interaction_type_options_for_profile(DEFAULT_PROFILE, DEFAULT_INTERACTION_TYPE)
 
@@ -2033,7 +2074,7 @@ class ApexGuiApp:
                                 dbc.Label("提交参数文件名"),
                                 dbc.Input(
                                     id="submit-param-file",
-                                    value="param.json",
+                                    value=initial_param_file,
                                     placeholder="param.json",
                                 ),
                                 html.Br(),
@@ -2090,7 +2131,7 @@ class ApexGuiApp:
                                 dbc.Label("param.json 编辑区"),
                                 dcc.Textarea(
                                     id="submit-param-editor",
-                                    value=DEFAULT_PARAM_EDITOR_TEXT,
+                                    value=initial_param_text,
                                     style={"width": "100%", "height": "300px", "fontFamily": "monospace"},
                                 ),
                             ],
@@ -2424,6 +2465,19 @@ class ApexGuiApp:
             current_value = template_model if triggered_id == "submit-profile" else (current_model or template_model)
             options = _list_workdir_file_options(workdir, current_value)
             return options, current_value
+
+        @self.app.callback(
+            Output("submit-param-file", "value", allow_duplicate=True),
+            Output("submit-param-editor", "value", allow_duplicate=True),
+            Input("submit-workdir", "value"),
+            prevent_initial_call=True,
+        )
+        def _load_param_fallback_from_workdir(submit_workdir):
+            workdir = _normalize_workdir(submit_workdir)
+            param_file, param_text = _find_param_fallback_file(workdir)
+            if not param_file:
+                return dash.no_update, dash.no_update
+            return param_file, param_text
 
         @self.app.callback(
             Output("submit-param-editor", "value"),
@@ -2901,6 +2955,8 @@ class ApexGuiApp:
 
         @self.app.callback(
             Output("command-result", "data", allow_duplicate=True),
+            Output("submit-param-file", "value", allow_duplicate=True),
+            Output("submit-param-editor", "value", allow_duplicate=True),
             Input("submit-file-upload", "contents"),
             State("submit-file-upload", "filename"),
             State("submit-workdir", "value"),
@@ -2911,15 +2967,20 @@ class ApexGuiApp:
             try:
                 saved_files = _save_uploaded_files(upload_contents, upload_filenames, workdir, target_subdir="")
             except Exception as exc:
-                return _build_feedback(f"File upload failed: {exc}")
+                return _build_feedback(f"File upload failed: {exc}"), dash.no_update, dash.no_update
 
             if not saved_files:
-                return _build_feedback("No uploaded files received.")
+                return _build_feedback("No uploaded files received."), dash.no_update, dash.no_update
+
+            param_file, param_text = _find_param_fallback_file(workdir, preferred_files=saved_files)
+            param_message = ""
+            if param_file:
+                param_message = f" Using {param_file} as submit parameter file."
 
             return _build_feedback(
-                f"Uploaded {len(saved_files)} file(s) to {workdir}: " + ", ".join(saved_files),
+                f"Uploaded {len(saved_files)} file(s) to {workdir}: " + ", ".join(saved_files) + param_message,
                 ok=True,
-            )
+            ), (param_file or dash.no_update), (param_text or dash.no_update)
 
         @self.app.callback(
             Output("manage-log-content", "children"),

@@ -20,7 +20,9 @@ from apex.gui import (
     _ensure_default_interaction_files,
     _extract_property_types,
     _extract_potcar_rows,
+    _find_param_fallback_file,
     _is_retrieve_feedback,
+    _is_param_fallback_filename,
     _parse_extra_elements,
     _interaction_editor_label,
     _interaction_table_columns_for_profile,
@@ -618,6 +620,32 @@ class TestGuiSubmitBuilder(unittest.TestCase):
             self.assertEqual(saved, ["global.json"])
             with open(os.path.join(tmpdir, "global.json"), "rb") as f:
                 self.assertEqual(f.read(), b"INPUT\n")
+
+    def test_find_param_fallback_prefers_uploaded_param_star_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "param_old.json"), "w", encoding="utf-8") as f:
+                f.write('{"old": true}\n')
+            with open(os.path.join(tmpdir, "param_joint.json"), "w", encoding="utf-8") as f:
+                f.write('{"joint": true}\n')
+
+            param_file, param_text = _find_param_fallback_file(
+                tmpdir,
+                preferred_files=["param_joint.json"],
+            )
+
+            self.assertEqual(param_file, "param_joint.json")
+            self.assertEqual(param_text, '{"joint": true}\n')
+
+    def test_find_param_fallback_accepts_any_json_with_param_in_name(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "param.json"), "w", encoding="utf-8") as f:
+                f.write("{}")
+
+            self.assertEqual(_find_param_fallback_file(tmpdir), ("param.json", "{}"))
+            self.assertTrue(_is_param_fallback_filename("param.json"))
+            self.assertTrue(_is_param_fallback_filename("param_joint.json"))
+            self.assertTrue(_is_param_fallback_filename("my_param.json"))
+            self.assertFalse(_is_param_fallback_filename("global.json"))
 
     def test_save_uploaded_files_creates_confs_and_nested_paths(self):
         payload = base64.b64encode(b"POSCAR\n").decode("ascii")
