@@ -20,6 +20,7 @@ from apex.gui import (
     _ensure_default_interaction_files,
     _extract_property_types,
     _extract_potcar_rows,
+    _is_retrieve_feedback,
     _parse_extra_elements,
     _interaction_editor_label,
     _interaction_table_columns_for_profile,
@@ -30,6 +31,7 @@ from apex.gui import (
     _load_account_state,
     _load_profile_param_template,
     _patch_param_payload,
+    _parse_retrieve_progress_from_log,
     _parse_submit_payloads,
     _read_latest_workflow_id,
     _render_account_summary,
@@ -489,7 +491,7 @@ class TestGuiSubmitBuilder(unittest.TestCase):
 
             value, label, animated, text, next_state, feedback = _finalize_retrieve_status(state)
 
-            self.assertEqual(value, 50)
+            self.assertEqual(value, 5)
             self.assertEqual(label, "Retrieving")
             self.assertTrue(animated)
             self.assertEqual(text, RETRIEVE_RUNNING_MESSAGE)
@@ -525,6 +527,34 @@ class TestGuiSubmitBuilder(unittest.TestCase):
             self.assertEqual(text, "Retrieve finished; report started.")
             self.assertEqual(next_state, {})
             self.assertIn("Retrieve + report completed", feedback["message"])
+
+    def test_submit_status_file_is_not_treated_as_retrieve_feedback(self):
+        self.assertFalse(
+            _is_retrieve_feedback(
+                {
+                    "operation": "submit",
+                    "status_file": "/tmp/.apex-submit.status",
+                }
+            )
+        )
+        self.assertFalse(_is_retrieve_feedback({"status_file": "/tmp/.apex-submit.status"}))
+        self.assertTrue(
+            _is_retrieve_feedback(
+                {
+                    "operation": "retrieve",
+                    "status_file": "/tmp/.apex-retrieve.status",
+                }
+            )
+        )
+
+    def test_parse_retrieve_progress_from_log(self):
+        progress = _parse_retrieve_progress_from_log(
+            "Retrieving 4 workflow results wf-001 to /tmp/work\n"
+            "Retrieving result 1/4: relaxcal-conf-001\n"
+            "Retrieving result 2/4: propertycal-conf-001-eos-00\n"
+        )
+
+        self.assertEqual(progress, (50, "50%", f"{RETRIEVE_RUNNING_MESSAGE} 2/4: propertycal-conf-001-eos-00"))
 
     def test_parse_submit_payloads_rejects_dot_in_structures(self):
         global_text = json.dumps({})

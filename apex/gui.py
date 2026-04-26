@@ -372,6 +372,10 @@ def _build_feedback(message: str, ok: bool = False) -> Dict[str, Any]:
     }
 
 
+def _is_retrieve_feedback(payload: Any) -> bool:
+    return isinstance(payload, dict) and payload.get("operation") == "retrieve" and bool(payload.get("status_file"))
+
+
 def _resolve_triggered_id():
     if hasattr(dash, "ctx") and dash.ctx.triggered_id is not None:
         return dash.ctx.triggered_id
@@ -499,6 +503,7 @@ def _start_retrieve_in_background(workdir: str, workflow_id: str, global_file: s
     return {
         "ok": completed.returncode == 0,
         "message": RETRIEVE_RUNNING_MESSAGE if completed.returncode == 0 else "Retrieve failed to start.",
+        "operation": "retrieve",
         "command": shell_cmd,
         "returncode": str(completed.returncode),
         "stdout": completed.stdout.strip(),
@@ -570,6 +575,33 @@ def _read_log_tail(log_path: str = "apex.log", max_lines: int = 400, workdir: Op
     except OSError as exc:
         return f"Failed to read {log_path}: {exc}"
     return "".join(lines[-max_lines:]) if lines else f"{log_path} is empty."
+
+
+def _parse_retrieve_progress_from_log(log_text: str) -> Optional[Tuple[int, str, str]]:
+    total = None
+    current = 0
+    current_key = ""
+    for line in log_text.splitlines():
+        total_match = re.search(r"Retrieving\s+(\d+)\s+workflow results", line)
+        if total_match:
+            total = int(total_match.group(1))
+        progress_match = re.search(r"Retrieving result\s+(\d+)/(\d+):\s*(.+)", line)
+        if progress_match:
+            current = int(progress_match.group(1))
+            total = int(progress_match.group(2))
+            current_key = progress_match.group(3).strip()
+
+    if not total:
+        return None
+
+    percent = int(round((current / total) * 100)) if total > 0 else 100
+    percent = max(0, min(percent, 99 if current < total else 100))
+    label = f"{percent}%"
+    if current_key:
+        text = f"{RETRIEVE_RUNNING_MESSAGE} {current}/{total}: {current_key}"
+    else:
+        text = f"{RETRIEVE_RUNNING_MESSAGE} 0/{total}"
+    return percent, label, text
 
 
 def _parse_extra_elements(raw_text: str) -> List[str]:
@@ -1314,6 +1346,7 @@ def _run_submit_in_background(param_file: str, global_file: str, cwd: Optional[s
     return {
         "ok": completed.returncode == 0,
         "message": message if completed.returncode == 0 else "Background submit failed to start.",
+        "operation": "submit",
         "command": display_cmd,
         "returncode": str(completed.returncode),
         "stdout": completed.stdout.strip(),
@@ -1534,7 +1567,12 @@ def _finalize_retrieve_status(state_payload: Dict[str, Any]) -> Tuple[int, str, 
     workdir = retrieve_state.get("workdir") or state_payload.get("workdir") or os.getcwd()
     global_file = retrieve_state.get("global_file") or state_payload.get("global_file") or "global.json"
     if not status_file or not os.path.isfile(status_file):
-        return 50, "Retrieving", True, RETRIEVE_RUNNING_MESSAGE, retrieve_state, dash.no_update
+        log_text = _read_log_tail(log_file, max_lines=200, workdir=None) if log_file else ""
+        progress = _parse_retrieve_progress_from_log(log_text)
+        if progress:
+            value, label, text = progress
+            return value, label, True, text, retrieve_state, dash.no_update
+        return 5, "Retrieving", True, RETRIEVE_RUNNING_MESSAGE, retrieve_state, dash.no_update
 
     try:
         with open(status_file, "r", encoding="utf-8") as f:
@@ -2592,7 +2630,7 @@ class ApexGuiApp:
             prevent_initial_call=True,
         )
         def _sync_retrieve_state(payload, submit_state):
-            if not isinstance(payload, dict) or not payload.get("status_file"):
+            if not _is_retrieve_feedback(payload):
                 return dash.no_update
             state_payload = submit_state if isinstance(submit_state, dict) else {}
             return {

@@ -90,6 +90,30 @@ class FlowGenerator:
         return name
 
     @staticmethod
+    def _is_missing_artifact_error(exc: Exception) -> bool:
+        return "the artifact does not exist in the storage" in str(exc).lower()
+
+    @staticmethod
+    def _is_transient_download_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        markers = (
+            "connection",
+            "connect",
+            "timeout",
+            "timed out",
+            "temporarily unavailable",
+            "network",
+            "name resolution",
+            "dns",
+            "reset by peer",
+            "remote disconnected",
+            "broken pipe",
+            "ssl",
+            "proxy",
+        )
+        return any(marker in message for marker in markers)
+
+    @staticmethod
     def _download_artifact_with_retry(artifact, path, retries: int = 3, delay: int = 10):
         last_exc = None
         for attempt in range(1, retries + 1):
@@ -97,6 +121,11 @@ class FlowGenerator:
                 return download_artifact(artifact=artifact, path=path)
             except Exception as exc:
                 last_exc = exc
+                if (
+                        FlowGenerator._is_missing_artifact_error(exc)
+                        or not FlowGenerator._is_transient_download_error(exc)
+                ):
+                    raise RuntimeError(f"Artifact download failed without retry: {exc}") from exc
                 if attempt >= retries:
                     break
                 print(

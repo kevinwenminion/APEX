@@ -712,6 +712,33 @@ def _query_workflow_or_exit(wf: Workflow, wf_id: str):
         raise
 
 
+_ARTIFACT_NOT_IN_STORAGE = "the artifact does not exist in the storage"
+_TRANSIENT_DOWNLOAD_MARKERS = (
+    "connection",
+    "connect",
+    "timeout",
+    "timed out",
+    "temporarily unavailable",
+    "network",
+    "name resolution",
+    "dns",
+    "reset by peer",
+    "remote disconnected",
+    "broken pipe",
+    "ssl",
+    "proxy",
+)
+
+
+def _is_missing_artifact_error(exc: Exception) -> bool:
+    return _ARTIFACT_NOT_IN_STORAGE in str(exc).lower()
+
+
+def _is_transient_download_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in _TRANSIENT_DOWNLOAD_MARKERS)
+
+
 def _download_artifact_with_retry(artifact, path, retries: int = 3, delay: int = 10):
     last_exc = None
     for attempt in range(1, retries + 1):
@@ -719,6 +746,8 @@ def _download_artifact_with_retry(artifact, path, retries: int = 3, delay: int =
             return download_artifact(artifact=artifact, path=path)
         except Exception as exc:
             last_exc = exc
+            if _is_missing_artifact_error(exc) or not _is_transient_download_error(exc):
+                raise RuntimeError(f"Artifact download failed without retry: {exc}") from exc
             if attempt >= retries:
                 break
             logging.warning(
@@ -738,6 +767,42 @@ def _safe_get(obj, key, default=None):
     if isinstance(obj, dict):
         return obj.get(key, default)
     return getattr(obj, key, default)
+
+
+def _safe_parameter_value(step, name):
+    inputs = _safe_get(step, "inputs", {}) or {}
+    parameters = _safe_get(inputs, "parameters", {}) or {}
+    parameter = _safe_get(parameters, name)
+    if parameter is None:
+        return None
+    value = _safe_get(parameter, "value", parameter)
+    return str(value) if value not in (None, "") else None
+
+
+def _directory_has_entries(path: str) -> bool:
+    if not os.path.isdir(path):
+        return False
+    try:
+        with os.scandir(path) as entries:
+            return any(True for _ in entries)
+    except OSError:
+        return False
+
+
+def _retrieve_existing_result_dir(step, key: str, work_dir: str):
+    if str(key).startswith("propertycal-"):
+        path_to_prop = _safe_parameter_value(step, "path_to_prop")
+        if path_to_prop:
+            target = os.path.join(work_dir, path_to_prop)
+            return target if _directory_has_entries(target) else None
+        return None
+
+    if str(key).startswith("relaxcal-") or key == "relaxationcal":
+        flow_id = _safe_parameter_value(step, "flow_id")
+        if flow_id:
+            target = os.path.join(work_dir, flow_id, "relaxation")
+            return target if _directory_has_entries(target) else None
+    return None
 
 
 def _get_step_artifacts(step):
@@ -769,6 +834,11 @@ def _collect_step_with_children(wf_info, root_step):
         all_steps.extend(children)
         queue.extend(children)
     return all_steps
+
+
+def _is_retrievable_result_step_key(key: str) -> bool:
+    prefix = str(key).split("-")[0]
+    return prefix in {"propertycal", "relaxcal"} or key == "relaxationcal"
 
 
 def _download_failure_artifacts_for_step(wf_info, root_step, key, work_dir):
@@ -806,6 +876,16 @@ def _download_failure_artifacts_for_step(wf_info, root_step, key, work_dir):
                 _sanitize_path_token(art_name),
             )
             os.makedirs(target_dir, exist_ok=True)
+            if _directory_has_entries(target_dir):
+                logging.info(
+                    "Skip retrieving failure artifact %s for step %s (%s) "
+                    "because %s already contains files.",
+                    art_name,
+                    step_name,
+                    key,
+                    target_dir,
+                )
+                continue
             try:
                 _download_artifact_with_retry(artifact=artifact, path=target_dir)
                 downloaded += 1
@@ -1018,15 +1098,24 @@ def main():
         work_dir = args.work
         all_keys = _query_keys_of_steps_or_exit(wf, wf_id)
         wf_info = _query_workflow_or_exit(wf, wf_id)
-        download_keys = [key for key in all_keys if key.split('-')[0] == 'propertycal' or key == 'relaxationcal']
+        download_keys = [key for key in all_keys if _is_retrievable_result_step_key(key)]
         task_left = len(download_keys)
         print(f'Retrieving {task_left} workflow results {wf_id} to {work_dir}')
 
-        for key in download_keys:
+        for index, key in enumerate(download_keys, start=1):
             step = wf_info.get_step(key=key)[0]
             task_left -= 1
             phase = step['phase']
+            print(f"Retrieving result {index}/{len(download_keys)}: {key}", flush=True)
             if phase == 'Succeeded':
+                existing_result_dir = _retrieve_existing_result_dir(step, key, work_dir)
+                if existing_result_dir:
+                    logging.info(
+                        "Skip retrieving %s because %s already contains files.",
+                        key,
+                        existing_result_dir,
+                    )
+                    continue
                 logging.info(f"Retrieving {key}...({task_left} more left)")
                 try:
                     _download_artifact_with_retry(

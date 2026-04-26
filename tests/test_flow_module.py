@@ -108,6 +108,23 @@ class TestFlowModule(unittest.TestCase):
         self.assertEqual(mocked_download.call_count, 2)
         mocked_sleep.assert_called_once_with(1)
 
+    def test_download_artifact_with_retry_does_not_retry_missing_storage_artifact(self):
+        with mock.patch(
+                "apex.flow.download_artifact",
+                side_effect=RuntimeError("The artifact does not exist in the storage"),
+        ) as mocked_download, mock.patch("apex.flow.time.sleep") as mocked_sleep:
+            with self.assertRaises(RuntimeError) as context:
+                FlowGenerator._download_artifact_with_retry(
+                    artifact="remote-artifact",
+                    path="/tmp/out",
+                    retries=3,
+                    delay=1,
+                )
+
+        self.assertIn("without retry", str(context.exception))
+        mocked_download.assert_called_once()
+        mocked_sleep.assert_not_called()
+
     def test_download_step_main_logs_falls_back_to_child_relaxmake(self):
         fg = self._make_flow_generator()
 
