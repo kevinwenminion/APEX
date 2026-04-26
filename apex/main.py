@@ -8,7 +8,8 @@ from typing import List
 from dflow import (
     Workflow,
     query_workflows,
-    download_artifact
+    download_artifact,
+    config,
 )
 
 from apex import (
@@ -136,6 +137,11 @@ def parse_args():
         type=str, nargs='?',
         default='./global.json',
         help="The json file to config workflow",
+    )
+    parser_retrieve.add_argument(
+        "-d", "--debug",
+        action="store_true",
+        help="Retrieve failed-step diagnostic artifacts in dflow debug mode",
     )
 
     ##########################################
@@ -841,6 +847,10 @@ def _is_retrievable_result_step_key(key: str) -> bool:
     return prefix in {"propertycal", "relaxcal"} or key == "relaxationcal"
 
 
+def _should_retrieve_failure_artifacts(debug_requested: bool = False) -> bool:
+    return bool(debug_requested or config.get("mode") == "debug")
+
+
 def _download_failure_artifacts_for_step(wf_info, root_step, key, work_dir):
     preferred_names = {
         "main-logs",
@@ -1125,9 +1135,16 @@ def main():
                 except Exception as exc:
                     logging.warning(f"Retrieve {key} failed: {exc}")
             else:
+                if not _should_retrieve_failure_artifacts(args.debug):
+                    logging.warning(
+                        f"Step {key} with status: {phase} is not Succeeded; "
+                        f"skip failed-artifact retrieval because debug mode is not enabled. "
+                        f"({task_left} more left)"
+                    )
+                    continue
                 logging.warning(
                     f"Step {key} with status: {phase} is not Succeeded; "
-                    f"trying to retrieve failure artifacts...({task_left} more left)"
+                    f"trying to retrieve failure artifacts in debug mode...({task_left} more left)"
                 )
                 downloaded = _download_failure_artifacts_for_step(
                     wf_info=wf_info,

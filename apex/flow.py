@@ -50,6 +50,7 @@ class FlowGenerator:
             pool_size: Optional[int] = None,
             executor: Optional[DispatcherExecutor] = None,
             upload_python_packages: Optional[List[os.PathLike]] = None,
+            debug_mode: bool = False,
     ):
         self.download_path = None
         self.upload_path = None
@@ -71,6 +72,7 @@ class FlowGenerator:
         self.pool_size = pool_size
         self.executor = executor
         self.upload_python_packages = upload_python_packages
+        self.debug_mode = debug_mode
 
     @staticmethod
     def regulate_name(name):
@@ -344,6 +346,8 @@ class FlowGenerator:
             return None, str(exc)
 
     def _download_step_diagnostic_artifacts(self, step, step_label: str, step_info=None):
+        if not (self.debug_mode or dflow.config.get("mode") == "debug"):
+            return []
         diagnostic_names = {
             "backward_dir",
             "retrieve_path",

@@ -239,6 +239,7 @@ class TestFlowModule(unittest.TestCase):
 
     def test_download_step_diagnostic_artifacts_gets_child_backward_dir(self):
         fg = self._make_flow_generator()
+        fg.debug_mode = True
 
         with tempfile.TemporaryDirectory(prefix="apex-flow-") as td:
             fg.download_path = td
@@ -284,6 +285,26 @@ class TestFlowModule(unittest.TestCase):
                 artifact="run-backward-artifact",
                 path=expected_path,
             )
+
+    def test_download_step_diagnostic_artifacts_skips_outside_debug_mode(self):
+        fg = self._make_flow_generator()
+        parent_step = {
+            "id": "property-wrapper",
+            "outputs": {
+                "artifacts": {
+                    "backward_dir": "remote-artifact",
+                }
+            },
+        }
+
+        with mock.patch("apex.flow.download_artifact") as mocked_download:
+            artifacts = fg._download_step_diagnostic_artifacts(
+                parent_step,
+                "propertycal-bcc",
+            )
+
+        self.assertEqual(artifacts, [])
+        mocked_download.assert_not_called()
 
     def test_terminate_workflow_after_relax_failure(self):
         fg = self._make_flow_generator()

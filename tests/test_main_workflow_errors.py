@@ -35,6 +35,17 @@ class WorkflowQueryErrorTest(unittest.TestCase):
         self.assertTrue(apex_main._is_retrievable_result_step_key("relaxationcal"))
         self.assertFalse(apex_main._is_retrievable_result_step_key("relaxmake-rss-hea-conf-001"))
 
+    def test_failure_artifact_retrieval_requires_debug_mode(self):
+        old_mode = apex_main.config.get("mode")
+        try:
+            apex_main.config["mode"] = "default"
+            self.assertFalse(apex_main._should_retrieve_failure_artifacts(False))
+            self.assertTrue(apex_main._should_retrieve_failure_artifacts(True))
+            apex_main.config["mode"] = "debug"
+            self.assertTrue(apex_main._should_retrieve_failure_artifacts(False))
+        finally:
+            apex_main.config["mode"] = old_mode
+
     def test_formats_dflow_workflow_not_found_error(self):
         message = apex_main._format_workflow_query_error(
             "guipro-joint-svgzz",

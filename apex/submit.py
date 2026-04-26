@@ -554,7 +554,8 @@ def submit_workflow(
         group_size=group_size,
         pool_size=pool_size,
         executor=executor,
-        upload_python_packages=upload_python_packages
+        upload_python_packages=upload_python_packages,
+        debug_mode=is_debug,
     )
 
     if props_param and (phonolammps_run_command or lammps_run_command):
