@@ -42,6 +42,7 @@ from apex.gui import (
     _strip_parenthetical_suffix,
     _summarize_conf_progress,
     _summarize_step_progress,
+    _workflow_progress_percent,
 )
 
 
@@ -498,6 +499,28 @@ class TestGuiSubmitBuilder(unittest.TestCase):
             self.assertEqual(next_state["status"], "running")
             self.assertIs(feedback, gui_module.dash.no_update)
 
+    def test_finalize_retrieve_status_auto_detects_log_progress(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "apex-retrieve.log")
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "Retrieving 971 workflow results guitest-joint-pzcq4 to /tmp/work\n"
+                    "Retrieving result 123/971: propertycal-rss-hea-conf-084-eos-00\n"
+                )
+            state = {
+                "workdir": tmpdir,
+                "workflow_id": "guitest-joint-pzcq4",
+            }
+
+            value, label, animated, text, next_state, feedback = _finalize_retrieve_status(state)
+
+            self.assertEqual(value, 13)
+            self.assertEqual(label, "13%")
+            self.assertTrue(animated)
+            self.assertIn("123/971", text)
+            self.assertEqual(next_state, state)
+            self.assertIs(feedback, gui_module.dash.no_update)
+
     def test_finalize_retrieve_status_starts_report_after_success(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             status_file = os.path.join(tmpdir, ".apex-retrieve.status")
@@ -658,6 +681,11 @@ class TestGuiSubmitBuilder(unittest.TestCase):
         self.assertEqual(summary["total"], 4)
         self.assertEqual(summary["running"], 2)
         self.assertEqual(summary["finished"], 2)
+
+    def test_workflow_progress_percent_from_argo_progress(self):
+        self.assertEqual(_workflow_progress_percent("850/1942"), 44)
+        self.assertEqual(_workflow_progress_percent("Progress: 1 / 4"), 25)
+        self.assertEqual(_workflow_progress_percent(""), 0)
 
     def test_summarize_conf_progress_groups_property_tasks_by_conf(self):
         steps = [

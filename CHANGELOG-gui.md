@@ -31,8 +31,9 @@ Workflow & Data Management
     * Removed blocking report behavior.
     * Reports now launch via a separate port, preventing UI freeze during workflow execution.
 * Network-resilient Retrieve
-    * Automatic retry mechanism for retrieve operations.
-    * Prevents workflow interruption due to unstable network conditions.
+    * Retry retrieve downloads only for transient network failures.
+    * Permanent storage errors, such as missing artifacts, fail fast without retry.
+    * Prevents workflow interruption due to unstable network conditions while avoiding long waits on unrecoverable artifact errors.
 
 ⸻
 
@@ -48,8 +49,17 @@ Monitoring & Progress Tracking
 * Retrieve progress bar
     * Real-time progress visualization
     * Automatically skips already retrieved configurations (idempotent behavior)
+    * Automatically detects `apex-retrieve.log` in the selected Workdir and updates retrieve progress when retrieve is already running.
+    * Failed-artifact downloads skip existing `.failed-artifacts` target folders when files are already present.
 * Auto workflow status query
     * Entering a Workflow ID now triggers automatic status retrieval
+* Fast workflow progress query
+    * Workflow progress now first queries lightweight `Phase` and Argo `Progress` fields.
+    * Displays status such as `Phase: Running | Progress: 850/1942` without waiting for full step details.
+* Background workflow detail cache
+    * Detailed `Steps` and `Confs` statistics are queried in a background process.
+    * Detail refresh is throttled to 30 seconds and cached after completion.
+    * Slow full-step queries no longer block the GUI progress callback.
 
 ⸻
 

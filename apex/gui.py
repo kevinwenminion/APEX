@@ -4,13 +4,16 @@ import copy
 import glob
 import io
 import json
+import multiprocessing
 import os
+import queue
 import re
 import shlex
 import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import webbrowser
 import zipfile
 from datetime import datetime
@@ -32,6 +35,11 @@ BLOCKED_INLINE_COMMANDS = {"gui"}
 DEFAULT_SUBMIT_COMMAND = "nohup apex submit param.json -c global.json > apex.log 2>&1 &"
 SUBMIT_STATUS_FILE = ".apex-submit.status"
 SUBMIT_RUNNING_NOTICE = "任务已提交,正在运行,详情请转到Log页面查看"
+WORKFLOW_PROGRESS_QUERY_TIMEOUT_SECONDS = 8
+WORKFLOW_QUICK_QUERY_TIMEOUT_SECONDS = 5
+WORKFLOW_DETAIL_REFRESH_SECONDS = 30
+WORKFLOW_DETAIL_QUERY_TIMEOUT_SECONDS = 25
+_WORKFLOW_DETAIL_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG_DIR = os.path.join(THIS_DIR, "default_config")
@@ -1280,14 +1288,7 @@ def _query_workflow_progress(workflow_id: str, config_file: str) -> Tuple[Dict[s
     except Exception as exc:
         raise RuntimeError(f"dflow is unavailable: {exc}") from exc
 
-    from apex.config import Config
-    from apex.utils import load_config_file
-
-    config_dict = load_config_file(config_file)
-    wf_config = Config(**config_dict)
-    Config.config_dflow(wf_config.dflow_config_dict)
-    Config.config_bohrium(wf_config.bohrium_config_dict)
-    Config.config_s3(wf_config.dflow_s3_config_dict)
+    _configure_dflow_from_config(config_file)
 
     wf = Workflow(id=workflow_id)
     info = wf.query()
@@ -1297,6 +1298,176 @@ def _query_workflow_progress(workflow_id: str, config_file: str) -> Tuple[Dict[s
     workflow_phase = str(getattr(getattr(info, "status", None), "phase", "Unknown"))
     progress_text = str(getattr(getattr(info, "status", None), "progress", ""))
     return counts, workflow_phase, progress_text
+
+
+def _configure_dflow_from_config(config_file: str) -> None:
+    from apex.config import Config
+    from apex.utils import load_config_file
+
+    config_dict = load_config_file(config_file)
+    wf_config = Config(**config_dict)
+    Config.config_dflow(wf_config.dflow_config_dict)
+    Config.config_bohrium(wf_config.bohrium_config_dict)
+    Config.config_s3(wf_config.dflow_s3_config_dict)
+
+
+def _query_workflow_phase_progress(workflow_id: str, config_file: str) -> Tuple[str, str]:
+    try:
+        from dflow import Workflow
+    except Exception as exc:
+        raise RuntimeError(f"dflow is unavailable: {exc}") from exc
+
+    _configure_dflow_from_config(config_file)
+    wf = Workflow(id=workflow_id)
+    info = wf.query(fields=["status.phase", "status.progress"])
+    status = getattr(info, "status", None)
+    workflow_phase = str(getattr(status, "phase", "Unknown"))
+    progress_text = str(getattr(status, "progress", "") or "")
+    return workflow_phase, progress_text
+
+
+def _query_workflow_progress_worker(result_queue, workflow_id: str, config_file: str) -> None:
+    try:
+        result_queue.put(("ok", _query_workflow_progress(workflow_id, config_file)))
+    except Exception as exc:
+        result_queue.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
+def _query_workflow_phase_progress_worker(result_queue, workflow_id: str, config_file: str) -> None:
+    try:
+        result_queue.put(("ok", _query_workflow_phase_progress(workflow_id, config_file)))
+    except Exception as exc:
+        result_queue.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
+def _run_query_worker_with_timeout(target, workflow_id: str, config_file: str, timeout: int):
+    try:
+        ctx = multiprocessing.get_context("fork")
+    except ValueError:
+        ctx = multiprocessing.get_context()
+    result_queue = ctx.Queue()
+    process = ctx.Process(
+        target=target,
+        args=(result_queue, workflow_id, config_file),
+    )
+    process.daemon = True
+    process.start()
+    process.join(timeout)
+    if process.is_alive():
+        process.terminate()
+        process.join(2)
+        raise TimeoutError(f"workflow progress query timed out after {timeout}s")
+    try:
+        status, payload = result_queue.get_nowait()
+    except queue.Empty as exc:
+        raise RuntimeError(f"workflow progress query exited without a result (code {process.exitcode})") from exc
+    if status == "error":
+        raise RuntimeError(payload)
+    return payload
+
+
+def _query_workflow_phase_progress_with_timeout(
+        workflow_id: str,
+        config_file: str,
+        timeout: int = WORKFLOW_QUICK_QUERY_TIMEOUT_SECONDS,
+) -> Tuple[str, str]:
+    return _run_query_worker_with_timeout(
+        _query_workflow_phase_progress_worker,
+        workflow_id,
+        config_file,
+        timeout,
+    )
+
+
+def _query_workflow_progress_with_timeout(
+        workflow_id: str,
+        config_file: str,
+        timeout: int = WORKFLOW_PROGRESS_QUERY_TIMEOUT_SECONDS,
+) -> Tuple[Dict[str, int], str, str]:
+    return _run_query_worker_with_timeout(
+        _query_workflow_progress_worker,
+        workflow_id,
+        config_file,
+        timeout,
+    )
+
+
+def _workflow_progress_percent(progress_text: str) -> int:
+    match = re.search(r"(\d+)\s*/\s*(\d+)", progress_text or "")
+    if not match:
+        return 0
+    current = int(match.group(1))
+    total = int(match.group(2))
+    if total <= 0:
+        return 0
+    return max(0, min(100, int(round((current / total) * 100))))
+
+
+def _workflow_detail_cache_key(workflow_id: str, config_file: str) -> Tuple[str, str]:
+    return workflow_id, os.path.abspath(config_file)
+
+
+def _start_workflow_detail_query(entry: Dict[str, Any], workflow_id: str, config_file: str, now: float) -> None:
+    try:
+        ctx = multiprocessing.get_context("fork")
+    except ValueError:
+        ctx = multiprocessing.get_context()
+    result_queue = ctx.Queue()
+    process = ctx.Process(
+        target=_query_workflow_progress_worker,
+        args=(result_queue, workflow_id, config_file),
+    )
+    process.daemon = True
+    process.start()
+    entry["process"] = process
+    entry["queue"] = result_queue
+    entry["started_at"] = now
+    entry["last_start_at"] = now
+    entry["running"] = True
+
+
+def _poll_workflow_detail_cache(entry: Dict[str, Any], now: float) -> None:
+    process = entry.get("process")
+    result_queue = entry.get("queue")
+    if process is None:
+        return
+    if process.is_alive():
+        started_at = entry.get("started_at", now)
+        if now - started_at > WORKFLOW_DETAIL_QUERY_TIMEOUT_SECONDS:
+            process.terminate()
+            process.join(2)
+            entry["error"] = f"detail query timed out after {WORKFLOW_DETAIL_QUERY_TIMEOUT_SECONDS}s"
+            entry["running"] = False
+            entry.pop("process", None)
+            entry.pop("queue", None)
+        return
+    try:
+        status, payload = result_queue.get_nowait() if result_queue is not None else ("error", "detail query exited without a result")
+    except queue.Empty:
+        status, payload = "error", f"detail query exited without a result (code {process.exitcode})"
+    if status == "ok":
+        counts, workflow_phase, raw_progress = payload
+        entry["counts"] = counts
+        entry["workflow_phase"] = workflow_phase
+        entry["raw_progress"] = raw_progress
+        entry["updated_at"] = now
+        entry.pop("error", None)
+    else:
+        entry["error"] = payload
+    entry["running"] = False
+    entry.pop("process", None)
+    entry.pop("queue", None)
+
+
+def _get_workflow_detail_cache(workflow_id: str, config_file: str, now: Optional[float] = None) -> Dict[str, Any]:
+    timestamp = time.time() if now is None else now
+    key = _workflow_detail_cache_key(workflow_id, config_file)
+    entry = _WORKFLOW_DETAIL_CACHE.setdefault(key, {})
+    _poll_workflow_detail_cache(entry, timestamp)
+    last_start_at = entry.get("last_start_at", 0.0)
+    if not entry.get("running") and timestamp - last_start_at >= WORKFLOW_DETAIL_REFRESH_SECONDS:
+        _start_workflow_detail_query(entry, workflow_id, config_file, timestamp)
+    return entry
 
 
 def _build_submit_shell_command(param_file: str, global_file: str) -> Tuple[str, str]:
@@ -1560,6 +1731,16 @@ def _finalize_retrieve_status(state_payload: Dict[str, Any]) -> Tuple[int, str, 
         else:
             retrieve_state = state_payload.get("retrieve")
     if not isinstance(retrieve_state, dict) or retrieve_state.get("status") != "running":
+        workdir = state_payload.get("workdir") if isinstance(state_payload, dict) else ""
+        workflow_id = state_payload.get("workflow_id") if isinstance(state_payload, dict) else ""
+        log_file = os.path.join(_normalize_workdir(workdir or os.getcwd()), "apex-retrieve.log")
+        if os.path.isfile(log_file):
+            log_text = _read_log_tail(log_file, max_lines=200, workdir=None)
+            if not workflow_id or f"workflow results {workflow_id}" in log_text:
+                progress = _parse_retrieve_progress_from_log(log_text)
+                if progress:
+                    value, label, text = progress
+                    return value, label, True, text, state_payload, dash.no_update
         return 0, "0%", False, "Retrieve 未运行", {}, dash.no_update
 
     status_file = retrieve_state.get("status_file") or ""
@@ -2542,7 +2723,16 @@ class ApexGuiApp:
                 )
 
             try:
-                counts, workflow_phase, raw_progress = _query_workflow_progress(workflow_id, config_path)
+                workflow_phase, raw_progress = _query_workflow_phase_progress_with_timeout(workflow_id, config_path)
+            except TimeoutError as exc:
+                return (
+                    0,
+                    "0%",
+                    f"远端进度查询超时: {exc} | Last updated: {updated_at}",
+                    "Total: 0 | Running: 0 | Finished: 0",
+                    state_payload,
+                    workflow_id,
+                )
             except Exception as exc:
                 return (
                     0,
@@ -2553,22 +2743,39 @@ class ApexGuiApp:
                     workflow_id,
                 )
 
-            total = counts.get("total", 0)
-            finished = counts.get("finished", 0)
-            running = counts.get("running", 0)
-            percent = int(round((finished / total) * 100)) if total > 0 else 0
+            detail_cache = _get_workflow_detail_cache(workflow_id, config_path)
+            percent = _workflow_progress_percent(raw_progress)
             phase_text = f"Workflow {workflow_id} | Phase: {workflow_phase} | Last updated: {updated_at}"
             if raw_progress:
-                phase_text += f" | Raw: {raw_progress}"
-            conf_total = counts.get("conf_total", 0)
-            conf_finished = counts.get("conf_finished", 0)
-            conf_running = counts.get("conf_running", 0)
-            conf_failed = counts.get("conf_failed", 0)
-            stats = (
-                f"Steps: Total {total} | Running {running} | Finished {finished}"
-                f" | Confs: Total {conf_total} | Running {conf_running} | "
-                f"Finished {conf_finished} | Failed {conf_failed}"
-            )
+                phase_text += f" | Progress: {raw_progress}"
+
+            counts = detail_cache.get("counts")
+            if isinstance(counts, dict):
+                total = counts.get("total", 0)
+                finished = counts.get("finished", 0)
+                running = counts.get("running", 0)
+                conf_total = counts.get("conf_total", 0)
+                conf_finished = counts.get("conf_finished", 0)
+                conf_running = counts.get("conf_running", 0)
+                conf_failed = counts.get("conf_failed", 0)
+                detail_updated_at = detail_cache.get("updated_at")
+                detail_suffix = ""
+                if detail_updated_at:
+                    detail_suffix = " | Details updated: " + datetime.fromtimestamp(detail_updated_at).strftime("%H:%M:%S")
+                if detail_cache.get("running"):
+                    detail_suffix += " | Refreshing details..."
+                stats = (
+                    f"Steps: Total {total} | Running {running} | Finished {finished}"
+                    f" | Confs: Total {conf_total} | Running {conf_running} | "
+                    f"Finished {conf_finished} | Failed {conf_failed}"
+                    f"{detail_suffix}"
+                )
+            elif detail_cache.get("running"):
+                stats = "Steps/Confs: querying details in background..."
+            elif detail_cache.get("error"):
+                stats = f"Steps/Confs: detail query failed: {detail_cache['error']}"
+            else:
+                stats = "Steps/Confs: detail query pending."
             return percent, f"{percent}%", phase_text, stats, state_payload, workflow_id
 
         @self.app.callback(
@@ -2580,10 +2787,16 @@ class ApexGuiApp:
             Output("command-result", "data", allow_duplicate=True),
             Input("submit-progress-interval", "n_intervals"),
             State("retrieve-state", "data"),
+            State("submit-workdir", "value"),
+            State("submit-workflow-id", "value"),
             prevent_initial_call=True,
         )
-        def _refresh_retrieve_progress(_n_intervals, retrieve_state):
+        def _refresh_retrieve_progress(_n_intervals, retrieve_state, submit_workdir, submit_workflow_id):
             state_payload = copy.deepcopy(retrieve_state) if isinstance(retrieve_state, dict) else {}
+            if submit_workdir and not state_payload.get("workdir"):
+                state_payload["workdir"] = _normalize_workdir(submit_workdir)
+            if submit_workflow_id and not state_payload.get("workflow_id"):
+                state_payload["workflow_id"] = submit_workflow_id.strip()
             value, label, animated, text, next_state, feedback = _finalize_retrieve_status(state_payload)
             return value, label, animated, text, next_state, feedback
 
