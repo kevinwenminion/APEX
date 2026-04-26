@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import webbrowser
 import zipfile
 from datetime import datetime
@@ -26,9 +27,18 @@ from apex.account import DEFAULT_BOHRIUM_CONFIG, get_account_config_path, load_a
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8060
-BLOCKED_INLINE_COMMANDS = {"gui", "report"}
+DEFAULT_REPORT_PORT = 8070
+RETRIEVE_RUNNING_MESSAGE = "正在提取文件中..."
+BLOCKED_INLINE_COMMANDS = {"gui"}
 DEFAULT_SUBMIT_COMMAND = "nohup apex submit param.json -c global.json > apex.log 2>&1 &"
+SUBMIT_STATUS_FILE = ".apex-submit.status"
 SUBMIT_RUNNING_NOTICE = "任务已提交，正在运行，详情请转到Log页面查看"
+WORKFLOW_PROGRESS_QUERY_TIMEOUT_SECONDS = 8
+WORKFLOW_QUICK_QUERY_TIMEOUT_SECONDS = 5
+WORKFLOW_DETAIL_REFRESH_SECONDS = 30
+WORKFLOW_DETAIL_QUERY_TIMEOUT_SECONDS = 25
+WORKFLOW_QUERY_RESULT_PREFIX = "__APEX_GUI_WORKFLOW_QUERY__"
+_WORKFLOW_DETAIL_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG_DIR = os.path.join(THIS_DIR, "default_config")
@@ -369,6 +379,10 @@ def _build_feedback(message: str, ok: bool = False) -> Dict[str, Any]:
     }
 
 
+def _is_retrieve_feedback(payload: Any) -> bool:
+    return isinstance(payload, dict) and payload.get("operation") == "retrieve" and bool(payload.get("status_file"))
+
+
 def _resolve_triggered_id():
     if hasattr(dash, "ctx") and dash.ctx.triggered_id is not None:
         return dash.ctx.triggered_id
@@ -410,6 +424,125 @@ def _run_apex_command(arguments: List[str], cwd: Optional[str] = None) -> Dict[s
     }
 
 
+def _run_apex_command_in_background(
+    arguments: List[str],
+    cwd: Optional[str] = None,
+    log_file: str = "apex-advanced.log",
+) -> Dict[str, Any]:
+    command = [sys.executable, "-m", "apex", *arguments]
+    display_cmd = " ".join(shlex.quote(token) for token in command)
+    shell_cmd = f"nohup {display_cmd} > {shlex.quote(log_file)} 2>&1 & echo $!"
+    try:
+        completed = subprocess.run(
+            ["bash", "-lc", shell_cmd],
+            cwd=cwd or os.getcwd(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "message": f"Failed to launch background command: {exc}",
+            "command": shell_cmd,
+            "returncode": "",
+            "stdout": "",
+            "stderr": str(exc),
+            "finished_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    pid = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
+    message = f"Background command started. Log file: {log_file}."
+    if pid:
+        message += f" PID: {pid}."
+    return {
+        "ok": completed.returncode == 0,
+        "message": message if completed.returncode == 0 else "Background command failed to start.",
+        "command": shell_cmd,
+        "returncode": str(completed.returncode),
+        "stdout": completed.stdout.strip(),
+        "stderr": completed.stderr.strip(),
+        "finished_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def _start_retrieve_in_background(workdir: str, workflow_id: str, global_file: str) -> Dict[str, Any]:
+    log_file = os.path.join(workdir, "apex-retrieve.log")
+    status_file = os.path.join(workdir, ".apex-retrieve.status")
+    command = [
+        sys.executable,
+        "-m",
+        "apex",
+        "retrieve",
+        "-i",
+        workflow_id,
+        "-w",
+        workdir,
+        "-c",
+        global_file,
+    ]
+    display_cmd = " ".join(shlex.quote(token) for token in command)
+    shell_cmd = (
+        f"rm -f {shlex.quote(status_file)}; "
+        f"({display_cmd} > {shlex.quote(log_file)} 2>&1; "
+        f"code=$?; printf \"%s\" \"$code\" > {shlex.quote(status_file)}) & echo $!"
+    )
+    try:
+        completed = subprocess.run(
+            ["bash", "-lc", shell_cmd],
+            cwd=workdir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "message": f"Failed to launch retrieve: {exc}",
+            "command": shell_cmd,
+            "returncode": "",
+            "stdout": "",
+            "stderr": str(exc),
+            "finished_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    pid = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
+    return {
+        "ok": completed.returncode == 0,
+        "message": RETRIEVE_RUNNING_MESSAGE if completed.returncode == 0 else "Retrieve failed to start.",
+        "operation": "retrieve",
+        "command": shell_cmd,
+        "returncode": str(completed.returncode),
+        "stdout": completed.stdout.strip(),
+        "stderr": completed.stderr.strip(),
+        "finished_at": datetime.now().isoformat(timespec="seconds"),
+        "pid": pid,
+        "workdir": workdir,
+        "workflow_id": workflow_id,
+        "global_file": global_file,
+        "log_file": log_file,
+        "status_file": status_file,
+    }
+
+
+def _advanced_report_args(arguments: List[str], report_port: int = DEFAULT_REPORT_PORT) -> List[str]:
+    normalized = list(arguments)
+    if not normalized or normalized[0] != "report":
+        return normalized
+
+    if "--no-browser" not in normalized:
+        normalized.append("--no-browser")
+    has_port = any(
+        arg == "-p"
+        or arg == "--port"
+        or arg.startswith("--port=")
+        for arg in normalized
+    )
+    if not has_port:
+        normalized.extend(["--port", str(report_port)])
+    return normalized
+
+
 def _format_feedback(payload: Dict[str, Any]) -> str:
     if not payload:
         return "Click any action button to run an APEX command."
@@ -449,6 +582,33 @@ def _read_log_tail(log_path: str = "apex.log", max_lines: int = 400, workdir: Op
     except OSError as exc:
         return f"Failed to read {log_path}: {exc}"
     return "".join(lines[-max_lines:]) if lines else f"{log_path} is empty."
+
+
+def _parse_retrieve_progress_from_log(log_text: str) -> Optional[Tuple[int, str, str]]:
+    total = None
+    current = 0
+    current_key = ""
+    for line in log_text.splitlines():
+        total_match = re.search(r"Retrieving\s+(\d+)\s+workflow results", line)
+        if total_match:
+            total = int(total_match.group(1))
+        progress_match = re.search(r"Retrieving result\s+(\d+)/(\d+):\s*(.+)", line)
+        if progress_match:
+            current = int(progress_match.group(1))
+            total = int(progress_match.group(2))
+            current_key = progress_match.group(3).strip()
+
+    if not total:
+        return None
+
+    percent = int(round((current / total) * 100)) if total > 0 else 100
+    percent = max(0, min(percent, 99 if current < total else 100))
+    label = f"{percent}%"
+    if current_key:
+        text = f"{RETRIEVE_RUNNING_MESSAGE} {current}/{total}: {current_key}"
+    else:
+        text = f"{RETRIEVE_RUNNING_MESSAGE} 0/{total}"
+    return percent, label, text
 
 
 def _parse_extra_elements(raw_text: str) -> List[str]:
@@ -654,6 +814,142 @@ def _build_param_payload(
     return payload
 
 
+def _parse_param_editor_payload(raw_text: str, fallback_template: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        parsed = json.loads(raw_text or "")
+    except json.JSONDecodeError:
+        return copy.deepcopy(fallback_template)
+    return copy.deepcopy(parsed) if isinstance(parsed, dict) else copy.deepcopy(fallback_template)
+
+
+def _property_items_by_type(items: List[Any]) -> Dict[str, List[Dict[str, Any]]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        ptype = item.get("type")
+        if ptype:
+            grouped.setdefault(str(ptype), []).append(item)
+    return grouped
+
+
+def _patch_properties(
+    payload: Dict[str, Any],
+    template: Dict[str, Any],
+    selected_properties: List[str],
+) -> None:
+    existing_by_type = _property_items_by_type(payload.get("properties", []))
+    template_by_type = _property_items_by_type(template.get("properties", []))
+    next_properties = []
+    used_counts: Dict[str, int] = {}
+    for ptype in selected_properties or []:
+        ptype = str(ptype)
+        idx = used_counts.get(ptype, 0)
+        candidates = existing_by_type.get(ptype) or template_by_type.get(ptype) or []
+        if idx < len(candidates):
+            item = copy.deepcopy(candidates[idx])
+        elif candidates:
+            item = copy.deepcopy(candidates[-1])
+        else:
+            item = {"type": ptype}
+        item["type"] = ptype
+        item["req_calc"] = True
+        next_properties.append(item)
+        used_counts[ptype] = idx + 1
+    payload["properties"] = next_properties
+
+
+def _patch_interaction(
+    payload: Dict[str, Any],
+    profile: str,
+    interaction_type: str,
+    interaction_model: str,
+    interaction_incar: str,
+    interaction_rows: List[Dict[str, str]],
+) -> None:
+    interaction_rows = interaction_rows or []
+    potcar_map = _rows_to_mapping(
+        [row.get("element", "") if isinstance(row, dict) else "" for row in interaction_rows],
+        [row.get("potcar", "") if isinstance(row, dict) else "" for row in interaction_rows],
+    )
+    orb_map = _rows_to_mapping(
+        [row.get("element", "") if isinstance(row, dict) else "" for row in interaction_rows],
+        [row.get("orb_file", "") if isinstance(row, dict) else "" for row in interaction_rows],
+    )
+    current = payload.get("interaction")
+    interaction_payload = copy.deepcopy(current) if isinstance(current, dict) else {}
+    effective_type = (interaction_type or "").strip() or interaction_payload.get("type") or (
+        profile if profile in {"vasp", "abacus"} else "eam_alloy"
+    )
+    interaction_payload["type"] = effective_type
+
+    if profile == "lammps":
+        model_text = (interaction_model or "").strip()
+        if model_text:
+            if "," in model_text:
+                interaction_payload["model"] = [item.strip() for item in model_text.split(",") if item.strip()]
+            else:
+                interaction_payload["model"] = model_text
+        elif effective_type != "eam_alloy":
+            interaction_payload.pop("model", None)
+        interaction_payload["type_map"] = "auto"
+        for key in ("input", "incar", "potcars", "potcar_prefix", "orb_files"):
+            interaction_payload.pop(key, None)
+    else:
+        interaction_payload.pop("model", None)
+        interaction_payload.pop("type_map", None)
+        path_key = _interaction_path_key(profile)
+        if (interaction_incar or "").strip():
+            interaction_payload[path_key] = interaction_incar.strip()
+        interaction_payload.pop("incar" if path_key == "input" else "input", None)
+        if potcar_map:
+            interaction_payload["potcars"] = potcar_map
+        if profile == "abacus" and orb_map:
+            interaction_payload["orb_files"] = orb_map
+
+    payload["interaction"] = interaction_payload
+
+
+def _patch_param_payload(
+    current_text: str,
+    triggered_id: str,
+    profile: str,
+    template: Dict[str, Any],
+    relax_check: List[str],
+    properties_check: List[str],
+    structures_value: List[str],
+    interaction_type: str,
+    interaction_model: str,
+    interaction_incar: str,
+    interaction_rows: List[Dict[str, str]],
+) -> Dict[str, Any]:
+    payload = _parse_param_editor_payload(current_text, template)
+    if triggered_id == "submit-structures":
+        payload["structures"] = [item.strip() for item in (structures_value or []) if isinstance(item, str) and item.strip()]
+    elif triggered_id == "submit-properties-check":
+        _patch_properties(payload, template, properties_check or [])
+    elif triggered_id == "submit-relax-check":
+        if "relax" in (relax_check or []):
+            payload.setdefault("relaxation", copy.deepcopy(template.get("relaxation", {})))
+        else:
+            payload.pop("relaxation", None)
+    elif triggered_id in {
+        "submit-interaction-type",
+        "submit-interaction-model",
+        "submit-interaction-incar",
+        "submit-interaction-table",
+    }:
+        _patch_interaction(
+            payload=payload,
+            profile=profile,
+            interaction_type=interaction_type,
+            interaction_model=interaction_model,
+            interaction_incar=interaction_incar,
+            interaction_rows=interaction_rows or [],
+        )
+    return payload
+
+
 def _normalize_workdir(workdir: str) -> str:
     clean = (workdir or "").strip()
     return os.path.abspath(clean or os.getcwd())
@@ -701,10 +997,33 @@ def _is_structure_candidate_dir(abs_dir: str) -> bool:
     return False
 
 
+def _structure_wildcard_options(structure_paths: List[str]) -> List[Dict[str, str]]:
+    groups: Dict[Tuple[str, str], List[str]] = {}
+    for rel_path in structure_paths:
+        parent, name = os.path.split(rel_path)
+        match = re.match(r"^(.*?)(\d+)$", name)
+        if not match:
+            continue
+        prefix = match.group(1)
+        if not prefix:
+            continue
+        groups.setdefault((parent, prefix), []).append(rel_path)
+
+    options = []
+    for (parent, prefix), members in sorted(groups.items()):
+        if len(members) < 2:
+            continue
+        wildcard = f"{prefix}*"
+        rel_wildcard = f"{parent}/{wildcard}" if parent else wildcard
+        options.append({"label": rel_wildcard, "value": rel_wildcard})
+    return options
+
+
 def _list_structure_path_options(workdir: str, current_values: Optional[List[str]] = None) -> List[Dict[str, str]]:
     target_dir = _normalize_workdir(workdir)
     options: List[Dict[str, str]] = []
     seen = set()
+    structure_paths: List[str] = []
 
     if os.path.isdir(target_dir):
         for root, dirnames, _filenames in os.walk(target_dir):
@@ -716,8 +1035,17 @@ def _list_structure_path_options(workdir: str, current_values: Optional[List[str
             if "." in rel_path:
                 continue
             if _is_structure_candidate_dir(root):
-                options.append({"label": rel_path, "value": rel_path})
-                seen.add(rel_path)
+                structure_paths.append(rel_path)
+
+    for wildcard_option in _structure_wildcard_options(structure_paths):
+        if wildcard_option["value"] not in seen:
+            options.append(wildcard_option)
+            seen.add(wildcard_option["value"])
+
+    for rel_path in structure_paths:
+        if rel_path not in seen:
+            options.append({"label": rel_path, "value": rel_path})
+            seen.add(rel_path)
 
     for current in current_values or []:
         clean_current = (current or "").strip()
@@ -851,6 +1179,17 @@ def _read_latest_workflow_id(workdir: str) -> str:
     return record.split("\t")[0].strip()
 
 
+def _tail_text_file(path: str, max_chars: int = 1600) -> str:
+    if not path or not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except OSError:
+        return ""
+    return content[-max_chars:].strip()
+
+
 def _summarize_step_progress(steps: List[Any]) -> Dict[str, int]:
     total = 0
     running = 0
@@ -873,12 +1212,94 @@ def _summarize_step_progress(steps: List[Any]) -> Dict[str, int]:
     return {"total": total, "running": running, "finished": finished}
 
 
+def _step_key(step: Any) -> str:
+    if isinstance(step, dict):
+        return str(step.get("key") or "")
+    return str(getattr(step, "key", "") or "")
+
+
+def _step_phase(step: Any) -> str:
+    if isinstance(step, dict):
+        return str(step.get("phase") or "")
+    return str(getattr(step, "phase", "") or "")
+
+
+def _step_parameter(step: Any, name: str) -> str:
+    inputs = step.get("inputs", {}) if isinstance(step, dict) else getattr(step, "inputs", None)
+    parameters = inputs.get("parameters", {}) if isinstance(inputs, dict) else getattr(inputs, "parameters", {})
+    if isinstance(parameters, dict):
+        item = parameters.get(name)
+        if isinstance(item, dict):
+            return str(item.get("value") or "")
+        return str(getattr(item, "value", item) or "")
+    for item in parameters or []:
+        if isinstance(item, dict) and item.get("name") == name:
+            return str(item.get("value") or "")
+        if getattr(item, "name", None) == name:
+            return str(getattr(item, "value", "") or "")
+    return ""
+
+
+def _conf_id_from_step(step: Any) -> str:
+    key = _step_key(step)
+    if key.startswith("relaxcal-"):
+        return _step_parameter(step, "flow_id") or key[len("relaxcal-"):]
+    if key.startswith("propertycal-"):
+        path_to_prop = _step_parameter(step, "path_to_prop")
+        if path_to_prop:
+            return os.path.dirname(path_to_prop).replace(os.path.sep, "/")
+        flow_id = _step_parameter(step, "flow_id")
+        if flow_id and "-" in flow_id:
+            return "-".join(flow_id.split("-")[:-2]) or flow_id
+        return key[len("propertycal-"):]
+    return ""
+
+
+def _summarize_conf_progress(steps: List[Any]) -> Dict[str, int]:
+    conf_phases: Dict[str, List[str]] = {}
+    for step in steps or []:
+        conf_id = _conf_id_from_step(step)
+        if not conf_id:
+            continue
+        conf_phases.setdefault(conf_id, []).append(_step_phase(step).lower())
+
+    finished = 0
+    running = 0
+    failed = 0
+    for phases in conf_phases.values():
+        if any(phase in {"failed", "error"} for phase in phases):
+            failed += 1
+        elif all(phase in {"succeeded", "skipped", "omitted"} for phase in phases):
+            finished += 1
+        else:
+            running += 1
+    return {
+        "conf_total": len(conf_phases),
+        "conf_running": running,
+        "conf_finished": finished,
+        "conf_failed": failed,
+    }
+
+
 def _query_workflow_progress(workflow_id: str, config_file: str) -> Tuple[Dict[str, int], str, str]:
     try:
         from dflow import Workflow
     except Exception as exc:
         raise RuntimeError(f"dflow is unavailable: {exc}") from exc
 
+    _configure_dflow_from_config(config_file)
+
+    wf = Workflow(id=workflow_id)
+    info = wf.query()
+    steps = info.get_step()
+    counts = _summarize_step_progress(steps)
+    counts.update(_summarize_conf_progress(steps))
+    workflow_phase = str(getattr(getattr(info, "status", None), "phase", "Unknown"))
+    progress_text = str(getattr(getattr(info, "status", None), "progress", ""))
+    return counts, workflow_phase, progress_text
+
+
+def _configure_dflow_from_config(config_file: str) -> None:
     from apex.config import Config
     from apex.utils import load_config_file
 
@@ -888,27 +1309,202 @@ def _query_workflow_progress(workflow_id: str, config_file: str) -> Tuple[Dict[s
     Config.config_bohrium(wf_config.bohrium_config_dict)
     Config.config_s3(wf_config.dflow_s3_config_dict)
 
+
+def _query_workflow_phase_progress(workflow_id: str, config_file: str) -> Tuple[str, str]:
+    try:
+        from dflow import Workflow
+    except Exception as exc:
+        raise RuntimeError(f"dflow is unavailable: {exc}") from exc
+
+    _configure_dflow_from_config(config_file)
     wf = Workflow(id=workflow_id)
-    info = wf.query()
-    counts = _summarize_step_progress(info.get_step())
-    workflow_phase = str(getattr(getattr(info, "status", None), "phase", "Unknown"))
-    progress_text = str(getattr(getattr(info, "status", None), "progress", ""))
+    info = wf.query(fields=["status.phase", "status.progress"])
+    status = getattr(info, "status", None)
+    workflow_phase = str(getattr(status, "phase", "Unknown"))
+    progress_text = str(getattr(status, "progress", "") or "")
+    return workflow_phase, progress_text
+
+
+def _workflow_query_subprocess_code() -> str:
+    return (
+        "import json, sys\n"
+        "from apex.gui import (\n"
+        "    WORKFLOW_QUERY_RESULT_PREFIX,\n"
+        "    _query_workflow_phase_progress,\n"
+        "    _query_workflow_progress,\n"
+        ")\n"
+        "kind, workflow_id, config_file = sys.argv[1:4]\n"
+        "try:\n"
+        "    if kind == 'phase':\n"
+        "        payload = _query_workflow_phase_progress(workflow_id, config_file)\n"
+        "    elif kind == 'detail':\n"
+        "        payload = _query_workflow_progress(workflow_id, config_file)\n"
+        "    else:\n"
+        "        raise ValueError(f'unknown workflow query kind: {kind}')\n"
+        "    result = {'ok': True, 'payload': payload}\n"
+        "except BaseException as exc:\n"
+        "    result = {'ok': False, 'error': f'{type(exc).__name__}: {exc}'}\n"
+        "print(WORKFLOW_QUERY_RESULT_PREFIX + json.dumps(result))\n"
+    )
+
+
+def _parse_workflow_query_subprocess_output(stdout: str, stderr: str, returncode: int):
+    for line in reversed((stdout or "").splitlines()):
+        if line.startswith(WORKFLOW_QUERY_RESULT_PREFIX):
+            payload = json.loads(line[len(WORKFLOW_QUERY_RESULT_PREFIX):])
+            if payload.get("ok"):
+                return payload.get("payload")
+            raise RuntimeError(payload.get("error") or "workflow query failed")
+    tail = (stderr or stdout or "").strip()
+    if len(tail) > 1000:
+        tail = tail[-1000:]
+    raise RuntimeError(f"workflow query exited without a result (code {returncode}): {tail}")
+
+
+def _workflow_query_command(kind: str, workflow_id: str, config_file: str) -> List[str]:
+    return [
+        sys.executable,
+        "-c",
+        _workflow_query_subprocess_code(),
+        kind,
+        workflow_id,
+        config_file,
+    ]
+
+
+def _run_query_subprocess_with_timeout(kind: str, workflow_id: str, config_file: str, timeout: int):
+    try:
+        completed = subprocess.run(
+            _workflow_query_command(kind, workflow_id, config_file),
+            cwd=os.getcwd(),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(f"workflow progress query timed out after {timeout}s") from exc
+    return _parse_workflow_query_subprocess_output(
+        completed.stdout,
+        completed.stderr,
+        completed.returncode,
+    )
+
+
+def _query_workflow_phase_progress_with_timeout(
+        workflow_id: str,
+        config_file: str,
+        timeout: int = WORKFLOW_QUICK_QUERY_TIMEOUT_SECONDS,
+) -> Tuple[str, str]:
+    return tuple(_run_query_subprocess_with_timeout(
+        "phase",
+        workflow_id,
+        config_file,
+        timeout,
+    ))
+
+
+def _query_workflow_progress_with_timeout(
+        workflow_id: str,
+        config_file: str,
+        timeout: int = WORKFLOW_PROGRESS_QUERY_TIMEOUT_SECONDS,
+) -> Tuple[Dict[str, int], str, str]:
+    payload = _run_query_subprocess_with_timeout(
+        "detail",
+        workflow_id,
+        config_file,
+        timeout,
+    )
+    counts, workflow_phase, progress_text = payload
     return counts, workflow_phase, progress_text
 
 
+def _workflow_progress_percent(progress_text: str) -> int:
+    match = re.search(r"(\d+)\s*/\s*(\d+)", progress_text or "")
+    if not match:
+        return 0
+    current = int(match.group(1))
+    total = int(match.group(2))
+    if total <= 0:
+        return 0
+    return max(0, min(100, int(round((current / total) * 100))))
+
+
+def _workflow_detail_cache_key(workflow_id: str, config_file: str) -> Tuple[str, str]:
+    return workflow_id, os.path.abspath(config_file)
+
+
+def _start_workflow_detail_query(entry: Dict[str, Any], workflow_id: str, config_file: str, now: float) -> None:
+    process = subprocess.Popen(
+        _workflow_query_command("detail", workflow_id, config_file),
+        cwd=os.getcwd(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    entry["process"] = process
+    entry["started_at"] = now
+    entry["last_start_at"] = now
+    entry["running"] = True
+
+
+def _poll_workflow_detail_cache(entry: Dict[str, Any], now: float) -> None:
+    process = entry.get("process")
+    if process is None:
+        return
+    if process.poll() is None:
+        started_at = entry.get("started_at", now)
+        if now - started_at > WORKFLOW_DETAIL_QUERY_TIMEOUT_SECONDS:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+            entry["error"] = f"detail query timed out after {WORKFLOW_DETAIL_QUERY_TIMEOUT_SECONDS}s"
+            entry["running"] = False
+            entry.pop("process", None)
+        return
+    try:
+        stdout, stderr = process.communicate(timeout=1)
+        payload = _parse_workflow_query_subprocess_output(stdout, stderr, process.returncode)
+        counts, workflow_phase, raw_progress = payload
+        entry["counts"] = counts
+        entry["workflow_phase"] = workflow_phase
+        entry["raw_progress"] = raw_progress
+        entry["updated_at"] = now
+        entry.pop("error", None)
+    except Exception as exc:
+        entry["error"] = str(exc)
+    entry["running"] = False
+    entry.pop("process", None)
+
+
+def _get_workflow_detail_cache(workflow_id: str, config_file: str, now: Optional[float] = None) -> Dict[str, Any]:
+    timestamp = time.time() if now is None else now
+    key = _workflow_detail_cache_key(workflow_id, config_file)
+    entry = _WORKFLOW_DETAIL_CACHE.setdefault(key, {})
+    _poll_workflow_detail_cache(entry, timestamp)
+    last_start_at = entry.get("last_start_at", 0.0)
+    if not entry.get("running") and timestamp - last_start_at >= WORKFLOW_DETAIL_REFRESH_SECONDS:
+        _start_workflow_detail_query(entry, workflow_id, config_file, timestamp)
+    return entry
+
+
 def _build_submit_shell_command(param_file: str, global_file: str) -> Tuple[str, str]:
-    apex_bin = shutil.which("apex")
-    if apex_bin:
-        submit_inner = (
-            f"{shlex.quote(apex_bin)} submit {shlex.quote(param_file)} -c {shlex.quote(global_file)}"
-        )
-        display_cmd = DEFAULT_SUBMIT_COMMAND
-    else:
-        submit_inner = (
-            f"{shlex.quote(sys.executable)} -m apex submit {shlex.quote(param_file)} -c {shlex.quote(global_file)}"
-        )
-        display_cmd = f"nohup {submit_inner} > apex.log 2>&1 &"
-    shell_cmd = f"nohup {submit_inner} > apex.log 2>&1 & echo $!"
+    submit_inner = (
+        f"{shlex.quote(sys.executable)} -m apex submit "
+        f"{shlex.quote(param_file)} -c {shlex.quote(global_file)} -s"
+    )
+    display_cmd = f"nohup {submit_inner} > apex.log 2>&1 &"
+    wrapped = (
+        f"{submit_inner} > apex.log 2>&1; "
+        f"code=$?; printf \"%s\" \"$code\" > {shlex.quote(SUBMIT_STATUS_FILE)}"
+    )
+    shell_cmd = (
+        f"rm -f {shlex.quote(SUBMIT_STATUS_FILE)}; "
+        f"nohup bash -lc {shlex.quote(wrapped)} >/dev/null 2>&1 & echo $!"
+    )
     return shell_cmd, display_cmd
 
 
@@ -942,11 +1538,13 @@ def _run_submit_in_background(param_file: str, global_file: str, cwd: Optional[s
     return {
         "ok": completed.returncode == 0,
         "message": message if completed.returncode == 0 else "Background submit failed to start.",
+        "operation": "submit",
         "command": display_cmd,
         "returncode": str(completed.returncode),
         "stdout": completed.stdout.strip(),
         "stderr": completed.stderr.strip(),
         "finished_at": datetime.now().isoformat(timespec="seconds"),
+        "status_file": os.path.join(cwd or os.getcwd(), SUBMIT_STATUS_FILE),
     }
 
 
@@ -1054,7 +1652,7 @@ def _write_submit_json_files(
 def _cleanup_reset_logs(workdir: str, filenames: Optional[List[str]] = None) -> List[str]:
     target_dir = _normalize_workdir(workdir)
     removed: List[str] = []
-    for name in filenames or ["dpdispatcher.log", ".workflow.log", "apex.log"]:
+    for name in filenames or ["dpdispatcher.log", ".workflow.log", "apex.log", "apex-report.log", ".apex-submit.status",".apex-retrieve.status","apex-retrieve.log"]:
         target_path = os.path.join(target_dir, name)
         if os.path.isfile(target_path):
             os.remove(target_path)
@@ -1062,16 +1660,26 @@ def _cleanup_reset_logs(workdir: str, filenames: Optional[List[str]] = None) -> 
     return removed
 
 
-def _run_report_in_background(config_file: str, report_target: str, cwd: str) -> Dict[str, Any]:
+def _run_report_in_background(
+    config_file: str,
+    report_target: str,
+    cwd: str,
+    port: int = DEFAULT_REPORT_PORT,
+) -> Dict[str, Any]:
     apex_bin = shutil.which("apex")
     if apex_bin:
         report_inner = (
-            f"{shlex.quote(apex_bin)} report --no-browser -c {shlex.quote(config_file)} -w {shlex.quote(report_target)}"
+            f"{shlex.quote(apex_bin)} report --no-browser -c {shlex.quote(config_file)} "
+            f"-w {shlex.quote(report_target)} --port {port}"
         )
-        display_cmd = f"nohup apex report --no-browser -c {shlex.quote(config_file)} -w {shlex.quote(report_target)} > apex-report.log 2>&1 &"
+        display_cmd = (
+            f"nohup apex report --no-browser -c {shlex.quote(config_file)} "
+            f"-w {shlex.quote(report_target)} --port {port} > apex-report.log 2>&1 &"
+        )
     else:
         report_inner = (
-            f"{shlex.quote(sys.executable)} -m apex report --no-browser -c {shlex.quote(config_file)} -w {shlex.quote(report_target)}"
+            f"{shlex.quote(sys.executable)} -m apex report --no-browser -c {shlex.quote(config_file)} "
+            f"-w {shlex.quote(report_target)} --port {port}"
         )
         display_cmd = f"nohup {report_inner} > apex-report.log 2>&1 &"
     shell_cmd = f"nohup {report_inner} > apex-report.log 2>&1 & echo $!"
@@ -1096,7 +1704,7 @@ def _run_report_in_background(config_file: str, report_target: str, cwd: str) ->
         }
 
     pid = completed.stdout.strip().splitlines()[-1] if completed.stdout.strip() else ""
-    message = "Report app started in background (default Dash port, usually 8050)."
+    message = f"Report app started in background on port {port}."
     if pid:
         message += f" PID: {pid}."
     message += " Log file: apex-report.log"
@@ -1111,7 +1719,7 @@ def _run_report_in_background(config_file: str, report_target: str, cwd: str) ->
     }
 
 
-def _run_finalize_pipeline(workdir: str, workflow_id: str, global_file: str, param_file: str) -> Dict[str, Any]:
+def _run_finalize_pipeline(workdir: str, workflow_id: str, global_file: str) -> Dict[str, Any]:
     retrieve_feedback = _run_apex_command(
         ["retrieve", "-i", workflow_id, "-w", workdir, "-c", global_file],
         cwd=workdir,
@@ -1120,17 +1728,9 @@ def _run_finalize_pipeline(workdir: str, workflow_id: str, global_file: str, par
         retrieve_feedback["message"] = f"Retrieve failed. {retrieve_feedback.get('message', '')}".strip()
         return retrieve_feedback
 
-    archive_feedback = _run_apex_command(
-        ["archive", param_file, "-c", global_file, "-w", workdir],
-        cwd=workdir,
-    )
-    if not archive_feedback.get("ok"):
-        archive_feedback["message"] = f"Archive failed. {archive_feedback.get('message', '')}".strip()
-        return archive_feedback
-
     all_result_path = os.path.join(workdir, "all_result.json")
     if not os.path.isfile(all_result_path):
-        return _build_feedback("Archive finished but all_result.json was not generated.")
+        return _build_feedback("Retrieve finished but all_result.json was not generated.")
 
     report_feedback = _run_report_in_background(global_file, workdir, cwd=workdir)
     if not report_feedback.get("ok"):
@@ -1138,10 +1738,77 @@ def _run_finalize_pipeline(workdir: str, workflow_id: str, global_file: str, par
         return report_feedback
 
     report_feedback["message"] = (
-        f"Retrieve + archive + report completed. all_result.json: {all_result_path}. "
+        f"Retrieve + report completed. all_result.json: {all_result_path}. "
         f"{report_feedback.get('message', '')}"
     )
     return report_feedback
+
+
+def _finalize_retrieve_status(state_payload: Dict[str, Any]) -> Tuple[int, str, bool, str, Dict[str, Any], Dict[str, Any]]:
+    retrieve_state = None
+    if isinstance(state_payload, dict):
+        if state_payload.get("status") == "running":
+            retrieve_state = state_payload
+        else:
+            retrieve_state = state_payload.get("retrieve")
+    if not isinstance(retrieve_state, dict) or retrieve_state.get("status") != "running":
+        workdir = state_payload.get("workdir") if isinstance(state_payload, dict) else ""
+        workflow_id = state_payload.get("workflow_id") if isinstance(state_payload, dict) else ""
+        log_file = os.path.join(_normalize_workdir(workdir or os.getcwd()), "apex-retrieve.log")
+        if os.path.isfile(log_file):
+            log_text = _read_log_tail(log_file, max_lines=200, workdir=None)
+            if not workflow_id or f"workflow results {workflow_id}" in log_text:
+                progress = _parse_retrieve_progress_from_log(log_text)
+                if progress:
+                    value, label, text = progress
+                    return value, label, True, text, state_payload, dash.no_update
+        return 0, "0%", False, "Retrieve 未运行", {}, dash.no_update
+
+    status_file = retrieve_state.get("status_file") or ""
+    log_file = retrieve_state.get("log_file") or ""
+    workdir = retrieve_state.get("workdir") or state_payload.get("workdir") or os.getcwd()
+    global_file = retrieve_state.get("global_file") or state_payload.get("global_file") or "global.json"
+    if not status_file or not os.path.isfile(status_file):
+        log_text = _read_log_tail(log_file, max_lines=200, workdir=None) if log_file else ""
+        progress = _parse_retrieve_progress_from_log(log_text)
+        if progress:
+            value, label, text = progress
+            return value, label, True, text, retrieve_state, dash.no_update
+        return 5, "Retrieving", True, RETRIEVE_RUNNING_MESSAGE, retrieve_state, dash.no_update
+
+    try:
+        with open(status_file, "r", encoding="utf-8") as f:
+            return_code = f.read().strip()
+    except OSError as exc:
+        feedback = _build_feedback(f"Retrieve status read failed: {exc}")
+        return 0, "Failed", False, "Retrieve 状态读取失败", {}, feedback
+
+    if return_code != "0":
+        log_tail = _read_log_tail(log_file, max_lines=120, workdir=None) if log_file else ""
+        feedback = _build_feedback("Retrieve failed.")
+        feedback["command"] = retrieve_state.get("command", "")
+        feedback["returncode"] = return_code
+        feedback["stderr"] = log_tail
+        return 100, "Failed", False, "Retrieve failed. See apex-retrieve.log.", {}, feedback
+
+    all_result_path = os.path.join(workdir, "all_result.json")
+    if not os.path.isfile(all_result_path):
+        feedback = _build_feedback("Retrieve finished but all_result.json was not generated.")
+        feedback["command"] = retrieve_state.get("command", "")
+        feedback["returncode"] = return_code
+        feedback["stdout"] = _read_log_tail(log_file, max_lines=80, workdir=None) if log_file else ""
+        return 100, "Done", False, "Retrieve finished; all_result.json missing.", {}, feedback
+
+    report_feedback = _run_report_in_background(global_file, workdir, cwd=workdir)
+    if not report_feedback.get("ok"):
+        report_feedback["message"] = f"Report failed. {report_feedback.get('message', '')}".strip()
+        return 100, "Done", False, "Retrieve finished; report failed.", {}, report_feedback
+
+    report_feedback["message"] = (
+        f"Retrieve + report completed. all_result.json: {all_result_path}. "
+        f"{report_feedback.get('message', '')}"
+    )
+    return 100, "100%", False, "Retrieve finished; report started.", {}, report_feedback
 
 
 DEFAULT_GLOBAL_EDITOR_TEXT = _json_dump_text(_load_profile_global(DEFAULT_PROFILE))
@@ -1386,7 +2053,7 @@ class ApexGuiApp:
                                 html.Br(),
                                 dbc.Button("Reset", id="submit-reset", color="secondary", className="me-2"),
                                 dbc.Button("Submit", id="submit-run", color="primary", className="me-2"),
-                                dbc.Button("Retrieve + Archive + Report", id="submit-finalize", color="success"),
+                                dbc.Button("Retrieve + Report", id="submit-finalize", color="success"),
                             ],
                             md=5,
                         ),
@@ -1441,6 +2108,9 @@ class ApexGuiApp:
                                 dbc.Progress(id="submit-progress-bar", value=0, max=100, striped=True, animated=True),
                                 html.Div(id="submit-progress-text", className="mt-2 text-muted"),
                                 html.Div(id="submit-progress-stats", className="text-muted"),
+                                html.H6("Retrieve 进度", className="mt-3"),
+                                dbc.Progress(id="retrieve-progress-bar", value=0, max=100, striped=True, animated=False),
+                                html.Div(id="retrieve-progress-text", className="mt-2 text-muted"),
                                 dcc.Interval(id="submit-progress-interval", interval=5000, n_intervals=0),
                             ],
                             md=12,
@@ -1448,7 +2118,7 @@ class ApexGuiApp:
                     ]
                 ),
                 html.Br(),
-                dbc.Label("运行命令 (Run submit 后后台执行)"),
+                dbc.Label("运行命令"),
                 html.Pre(
                     id="submit-command-preview",
                     children=DEFAULT_SUBMIT_COMMAND,
@@ -1587,6 +2257,7 @@ class ApexGuiApp:
                 html.H2("APEX Graphical Interface", className="mt-3"),
                 dcc.Store(id="command-result"),
                 dcc.Store(id="submit-state", data=DEFAULT_SUBMIT_STATE),
+                dcc.Store(id="retrieve-state", data={}),
                 dcc.ConfirmDialog(id="submit-confirm-dialog"),
                 dbc.Tabs(
                     [
@@ -1687,7 +2358,10 @@ class ApexGuiApp:
             triggered_id = _resolve_triggered_id()
             profile = profile if profile in PROFILE_NAMES else DEFAULT_PROFILE
 
-            if triggered_id in {"submit-profile", "submit-workdir", "submit-structures", "command-result"}:
+            if triggered_id == "command-result":
+                return current_data or []
+
+            if triggered_id in {"submit-profile", "submit-workdir", "submit-structures"}:
                 template = _load_profile_param_template(profile)
                 if profile in {"vasp", "abacus"}:
                     return _autodetect_interaction_rows(
@@ -1729,6 +2403,8 @@ class ApexGuiApp:
             template_structures = _extract_structure_defaults(template)
             current_value = template_structures if triggered_id == "submit-profile" else (current_structures or template_structures)
             options = _list_structure_path_options(workdir, current_value)
+            if triggered_id == "command-result":
+                return options, dash.no_update
             return options, current_value
 
         @self.app.callback(
@@ -1756,11 +2432,12 @@ class ApexGuiApp:
             Input("submit-relax-check", "value"),
             Input("submit-properties-check", "value"),
             Input("submit-structures", "value"),
+            Input("submit-interaction-type", "value"),
+            Input("submit-interaction-model", "value"),
+            Input("submit-interaction-incar", "value"),
             Input("submit-interaction-table", "data"),
             State("submit-profile", "value"),
-            State("submit-interaction-type", "value"),
-            State("submit-interaction-model", "value"),
-            State("submit-interaction-incar", "value"),
+            State("submit-param-editor", "value"),
             prevent_initial_call=True,
         )
         def _generate_param_editor(
@@ -1769,66 +2446,45 @@ class ApexGuiApp:
             relax_check,
             properties_check,
             structures_value,
-            interaction_table_rows,
-            profile_state,
             interaction_type,
             interaction_model,
             interaction_incar,
+            interaction_table_rows,
+            profile_state,
+            current_param_text,
         ):
             triggered_id = _resolve_triggered_id()
             profile = profile_state or profile_input or DEFAULT_PROFILE
             param_template = _load_profile_param_template(profile)
 
-            if triggered_id in {"submit-profile", "submit-reset", "submit-relax-check", "submit-properties-check"}:
+            if triggered_id in {"submit-profile", "submit-reset"}:
                 init_interaction_type, init_interaction_model, _init_elements = _extract_interaction_defaults(param_template)
                 init_structures = _extract_structure_defaults(param_template)
-                selected_props = (
-                    _extract_selected_properties(param_template)
-                    if triggered_id == "submit-profile"
-                    else (properties_check or [])
-                )
-                enable_relax = (
-                    "relaxation" in param_template
-                    if triggered_id == "submit-profile"
-                    else ("relax" in (relax_check or []))
-                )
-                if triggered_id == "submit-profile":
-                    next_structures = init_structures
-                    next_interaction_type = init_interaction_type
-                    next_interaction_model = init_interaction_model
-                    next_interaction_incar = _extract_interaction_incar(param_template)
-                    next_interaction_rows = _interaction_table_rows_from_template(profile, param_template)
-                else:
-                    next_structures = structures_value or init_structures
-                    next_interaction_type = interaction_type or init_interaction_type
-                    next_interaction_model = interaction_model or init_interaction_model
-                    next_interaction_incar = interaction_incar or _extract_interaction_incar(param_template)
-                    next_interaction_rows = interaction_table_rows or _interaction_table_rows_from_template(
-                        profile, param_template
-                    )
                 payload = _build_param_payload(
                     profile=profile,
-                    selected_structures=next_structures,
-                    with_relax=enable_relax,
-                    selected_properties=selected_props,
-                    interaction_type=next_interaction_type,
-                    interaction_model=next_interaction_model,
-                    interaction_incar=next_interaction_incar,
-                    interaction_rows=next_interaction_rows,
+                    selected_structures=init_structures,
+                    with_relax="relaxation" in param_template,
+                    selected_properties=_extract_selected_properties(param_template),
+                    interaction_type=init_interaction_type,
+                    interaction_model=init_interaction_model,
+                    interaction_incar=_extract_interaction_incar(param_template),
+                    interaction_rows=_interaction_table_rows_from_template(profile, param_template),
                     base_template=param_template,
                 )
                 return _json_dump_text(payload)
 
-            payload = _build_param_payload(
+            payload = _patch_param_payload(
+                current_text=current_param_text or "",
+                triggered_id=triggered_id,
                 profile=profile,
-                selected_structures=structures_value or [],
-                with_relax="relax" in (relax_check or []),
-                selected_properties=properties_check or [],
-                interaction_type=interaction_type or "eam_alloy",
+                template=param_template,
+                relax_check=relax_check or [],
+                properties_check=properties_check or [],
+                structures_value=structures_value or [],
+                interaction_type=interaction_type or "",
                 interaction_model=interaction_model or "",
                 interaction_incar=interaction_incar or "",
                 interaction_rows=interaction_table_rows or [],
-                base_template=param_template,
             )
             return _json_dump_text(payload)
 
@@ -1956,14 +2612,13 @@ class ApexGuiApp:
             if triggered_id == "submit-finalize":
                 workflow_id = current_workflow_id or state_payload.get("workflow_id", "") or _read_latest_workflow_id(workdir)
                 if not workflow_id:
-                    feedback = _build_feedback("Workflow ID is required for retrieve/archive/report. Fill it or submit first.")
+                    feedback = _build_feedback("Workflow ID is required for retrieve/report. Fill it or submit first.")
                     return feedback, False, default_confirm_message, state_payload, ""
 
-                final_feedback = _run_finalize_pipeline(
+                final_feedback = _start_retrieve_in_background(
                     workdir=workdir,
                     workflow_id=workflow_id,
                     global_file=global_file,
-                    param_file=param_file,
                 )
                 state_payload["workflow_id"] = workflow_id
                 return final_feedback, False, default_confirm_message, state_payload, workflow_id
@@ -1989,6 +2644,19 @@ class ApexGuiApp:
                         state_payload,
                         current_workflow_id,
                     )
+                if advanced_args[0] == "report":
+                    report_args = _advanced_report_args(advanced_args)
+                    return (
+                        _run_apex_command_in_background(
+                            report_args,
+                            cwd=workdir,
+                            log_file="apex-report.log",
+                        ),
+                        False,
+                        default_confirm_message,
+                        state_payload,
+                        current_workflow_id,
+                    )
                 return _run_apex_command(advanced_args, cwd=workdir), False, default_confirm_message, state_payload, current_workflow_id
 
             return _build_feedback("No action detected."), False, default_confirm_message, state_payload, current_workflow_id
@@ -2002,19 +2670,19 @@ class ApexGuiApp:
             Output("submit-workflow-id", "value", allow_duplicate=True),
             Input("submit-progress-interval", "n_intervals"),
             Input("command-result", "data"),
+            Input("submit-workflow-id", "value"),
+            Input("submit-workdir", "value"),
+            Input("submit-global-file", "value"),
             State("submit-state", "data"),
-            State("submit-workdir", "value"),
-            State("submit-global-file", "value"),
-            State("submit-workflow-id", "value"),
             prevent_initial_call=True,
         )
         def _refresh_submit_progress(
             _n_intervals,
             _command_result,
-            submit_state,
+            submit_workflow_id,
             submit_workdir,
             submit_global_file,
-            submit_workflow_id,
+            submit_state,
         ):
             state_payload = copy.deepcopy(submit_state) if isinstance(submit_state, dict) else copy.deepcopy(DEFAULT_SUBMIT_STATE)
             workdir = _normalize_workdir(submit_workdir or state_payload.get("workdir") or os.getcwd())
@@ -2022,47 +2690,136 @@ class ApexGuiApp:
             global_file = (submit_global_file or state_payload.get("global_file") or "global.json").strip()
             state_payload["global_file"] = global_file
 
-            workflow_id = (submit_workflow_id or "").strip() or state_payload.get("workflow_id", "")
+            workflow_id = (submit_workflow_id or "").strip()
             if not workflow_id:
-                workflow_id = _read_latest_workflow_id(workdir)
+                workflow_id = _read_latest_workflow_id(workdir) or state_payload.get("workflow_id", "")
             if workflow_id:
                 state_payload["workflow_id"] = workflow_id
 
             if not workflow_id:
-                return 0, "0%", "暂无 workflow id（提交后会自动识别）", "Total: 0 | Running: 0 | Finished: 0", state_payload, ""
+                updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                status_path = os.path.join(workdir, SUBMIT_STATUS_FILE)
+                status_code = _tail_text_file(status_path, max_chars=32)
+                if status_code and status_code != "0":
+                    log_tail = _tail_text_file(os.path.join(workdir, "apex.log"))
+                    stats = "Submit failed before writing .workflow.log."
+                    if log_tail:
+                        stats += f"\n\napex.log tail:\n{log_tail}"
+                    return (
+                        0,
+                        "0%",
+                        f"提交失败，未生成 workflow id | Last updated: {updated_at}",
+                        stats,
+                        state_payload,
+                        "",
+                    )
+                if os.path.isfile(os.path.join(workdir, "apex.log")) and not status_code:
+                    return (
+                        0,
+                        "0%",
+                        f"正在提交，等待 .workflow.log 生成 | Last updated: {updated_at}",
+                        "Submit process is still running or uploading inputs. Check apex.log for live output.",
+                        state_payload,
+                        "",
+                    )
+                return (
+                    0,
+                    "0%",
+                    f"暂无 workflow id（提交后会自动识别） | Last updated: {updated_at}",
+                    "Total: 0 | Running: 0 | Finished: 0",
+                    state_payload,
+                    "",
+                )
 
             config_path = _resolve_file_path(workdir, global_file)
+            updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if not os.path.isfile(config_path):
                 return (
                     0,
                     "0%",
-                    f"缺少配置文件: {config_path}",
+                    f"缺少配置文件: {config_path} | Last updated: {updated_at}",
                     "Total: 0 | Running: 0 | Finished: 0",
                     state_payload,
                     workflow_id,
                 )
 
             try:
-                counts, workflow_phase, raw_progress = _query_workflow_progress(workflow_id, config_path)
+                workflow_phase, raw_progress = _query_workflow_phase_progress_with_timeout(workflow_id, config_path)
+            except TimeoutError as exc:
+                return (
+                    0,
+                    "0%",
+                    f"远端进度查询超时: {exc} | Last updated: {updated_at}",
+                    "Total: 0 | Running: 0 | Finished: 0",
+                    state_payload,
+                    workflow_id,
+                )
             except Exception as exc:
                 return (
                     0,
                     "0%",
-                    f"无法查询 workflow 进度: {exc}",
+                    f"无法查询 workflow 进度: {exc} | Last updated: {updated_at}",
                     "Total: 0 | Running: 0 | Finished: 0",
                     state_payload,
                     workflow_id,
                 )
 
-            total = counts.get("total", 0)
-            finished = counts.get("finished", 0)
-            running = counts.get("running", 0)
-            percent = int(round((finished / total) * 100)) if total > 0 else 0
-            phase_text = f"Workflow {workflow_id} | Phase: {workflow_phase}"
+            detail_cache = _get_workflow_detail_cache(workflow_id, config_path)
+            percent = _workflow_progress_percent(raw_progress)
+            phase_text = f"Workflow {workflow_id} | Phase: {workflow_phase} | Last updated: {updated_at}"
             if raw_progress:
-                phase_text += f" | Raw: {raw_progress}"
-            stats = f"Total: {total} | Running: {running} | Finished: {finished}"
+                phase_text += f" | Progress: {raw_progress}"
+
+            counts = detail_cache.get("counts")
+            if isinstance(counts, dict):
+                total = counts.get("total", 0)
+                finished = counts.get("finished", 0)
+                running = counts.get("running", 0)
+                conf_total = counts.get("conf_total", 0)
+                conf_finished = counts.get("conf_finished", 0)
+                conf_running = counts.get("conf_running", 0)
+                conf_failed = counts.get("conf_failed", 0)
+                detail_updated_at = detail_cache.get("updated_at")
+                detail_suffix = ""
+                if detail_updated_at:
+                    detail_suffix = " | Details updated: " + datetime.fromtimestamp(detail_updated_at).strftime("%H:%M:%S")
+                if detail_cache.get("running"):
+                    detail_suffix += " | Refreshing details..."
+                stats = (
+                    f"Steps: Total {total} | Running {running} | Finished {finished}"
+                    f" | Confs: Total {conf_total} | Running {conf_running} | "
+                    f"Finished {conf_finished} | Failed {conf_failed}"
+                    f"{detail_suffix}"
+                )
+            elif detail_cache.get("running"):
+                stats = "Steps/Confs: querying details in background..."
+            elif detail_cache.get("error"):
+                stats = f"Steps/Confs: detail query failed: {detail_cache['error']}"
+            else:
+                stats = "Steps/Confs: detail query pending."
             return percent, f"{percent}%", phase_text, stats, state_payload, workflow_id
+
+        @self.app.callback(
+            Output("retrieve-progress-bar", "value"),
+            Output("retrieve-progress-bar", "label"),
+            Output("retrieve-progress-bar", "animated"),
+            Output("retrieve-progress-text", "children"),
+            Output("retrieve-state", "data", allow_duplicate=True),
+            Output("command-result", "data", allow_duplicate=True),
+            Input("submit-progress-interval", "n_intervals"),
+            State("retrieve-state", "data"),
+            State("submit-workdir", "value"),
+            State("submit-workflow-id", "value"),
+            prevent_initial_call=True,
+        )
+        def _refresh_retrieve_progress(_n_intervals, retrieve_state, submit_workdir, submit_workflow_id):
+            state_payload = copy.deepcopy(retrieve_state) if isinstance(retrieve_state, dict) else {}
+            if submit_workdir and not state_payload.get("workdir"):
+                state_payload["workdir"] = _normalize_workdir(submit_workdir)
+            if submit_workflow_id and not state_payload.get("workflow_id"):
+                state_payload["workflow_id"] = submit_workflow_id.strip()
+            value, label, animated, text, next_state, feedback = _finalize_retrieve_status(state_payload)
+            return value, label, animated, text, next_state, feedback
 
         @self.app.callback(
             Output("account-email", "value"),
@@ -2099,6 +2856,26 @@ class ApexGuiApp:
         @self.app.callback(Output("command-output", "children"), Input("command-result", "data"))
         def _render_output(payload):
             return _format_feedback(payload)
+
+        @self.app.callback(
+            Output("retrieve-state", "data", allow_duplicate=True),
+            Input("command-result", "data"),
+            State("submit-state", "data"),
+            prevent_initial_call=True,
+        )
+        def _sync_retrieve_state(payload, submit_state):
+            if not _is_retrieve_feedback(payload):
+                return dash.no_update
+            state_payload = submit_state if isinstance(submit_state, dict) else {}
+            return {
+                "status": "running",
+                "workdir": payload.get("workdir") or state_payload.get("workdir") or os.getcwd(),
+                "workflow_id": payload.get("workflow_id") or state_payload.get("workflow_id") or "",
+                "global_file": payload.get("global_file") or state_payload.get("global_file") or "global.json",
+                "log_file": payload.get("log_file", ""),
+                "status_file": payload.get("status_file", ""),
+                "command": payload.get("command", ""),
+            }
 
         @self.app.callback(
             Output("command-result", "data", allow_duplicate=True),

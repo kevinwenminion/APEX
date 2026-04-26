@@ -90,6 +90,54 @@ class FlowGenerator:
         return name
 
     @staticmethod
+    def _is_missing_artifact_error(exc: Exception) -> bool:
+        return "the artifact does not exist in the storage" in str(exc).lower()
+
+    @staticmethod
+    def _is_transient_download_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        markers = (
+            "connection",
+            "connect",
+            "timeout",
+            "timed out",
+            "temporarily unavailable",
+            "network",
+            "name resolution",
+            "dns",
+            "reset by peer",
+            "remote disconnected",
+            "broken pipe",
+            "ssl",
+            "proxy",
+        )
+        return any(marker in message for marker in markers)
+
+    @staticmethod
+    def _download_artifact_with_retry(artifact, path, retries: int = 3, delay: int = 10):
+        last_exc = None
+        for attempt in range(1, retries + 1):
+            try:
+                return download_artifact(artifact=artifact, path=path)
+            except Exception as exc:
+                last_exc = exc
+                if (
+                        FlowGenerator._is_missing_artifact_error(exc)
+                        or not FlowGenerator._is_transient_download_error(exc)
+                ):
+                    raise RuntimeError(f"Artifact download failed without retry: {exc}") from exc
+                if attempt >= retries:
+                    break
+                print(
+                    f"Artifact download failed ({attempt}/{retries}): {exc}. "
+                    f"Retrying in {delay}s..."
+                )
+                time.sleep(delay)
+        raise RuntimeError(
+            f"Artifact download failed after {retries} attempt(s): {last_exc}"
+        ) from last_exc
+
+    @staticmethod
     def _format_step_failure(
             step,
             fallback_label: str,
@@ -291,7 +339,7 @@ class FlowGenerator:
         )
         os.makedirs(log_dir, exist_ok=True)
         try:
-            return download_artifact(artifact=artifact, path=log_dir), None
+            return self._download_artifact_with_retry(artifact=artifact, path=log_dir), None
         except Exception as exc:
             return None, str(exc)
 
@@ -328,7 +376,7 @@ class FlowGenerator:
                 )
                 os.makedirs(out_dir, exist_ok=True)
                 try:
-                    path = download_artifact(artifact=artifact, path=out_dir)
+                    path = self._download_artifact_with_retry(artifact=artifact, path=out_dir)
                     downloaded.append(path)
                 except Exception as exc:
                     downloaded.append(f"{display_name}/{name}: unavailable ({exc})")
@@ -372,7 +420,7 @@ class FlowGenerator:
             if relax_post['phase'] == 'Succeeded':
                 print(f'Relaxation finished (ID: {self.workflow.id}, UID: {self.workflow.uid})')
                 print('Retrieving completed tasks to local...')
-                download_artifact(
+                self._download_artifact_with_retry(
                     artifact=relax_post.outputs.artifacts['retrieve_path'],
                     path=self.download_path
                 )
@@ -410,7 +458,7 @@ class FlowGenerator:
                 if step['phase'] == 'Succeeded':
                     print(f'Sub-workflow {kk} finished (ID: {self.workflow.id}, UID: {self.workflow.uid})')
                     print('Retrieving completed tasks to local...')
-                    download_artifact(
+                    self._download_artifact_with_retry(
                         artifact=step.outputs.artifacts['retrieve_path'],
                         path=self.download_path
                     )
@@ -587,7 +635,7 @@ class FlowGenerator:
                 if step['phase'] == 'Succeeded':
                     print(f'Sub relaxation {kk} finished (ID: {self.workflow.id}, UID: {self.workflow.uid})')
                     print('Retrieving completed tasks to local...')
-                    download_artifact(
+                    self._download_artifact_with_retry(
                         artifact=step.outputs.artifacts['retrieve_path'],
                         path=self.download_path
                     )
@@ -654,7 +702,7 @@ class FlowGenerator:
                     print('Retrieving completed tasks to local...')
                     retrieve = step.get('outputs', {}).get('artifacts', {}).get('retrieve_path', None)
                     if retrieve:
-                        download_artifact(artifact=retrieve, path=self.download_path)
+                        self._download_artifact_with_retry(artifact=retrieve, path=self.download_path)
                     relax_left.remove(kk)
                 elif step['phase'] == 'Failed':
                     print(f'Sub relaxation {kk} failed')
@@ -686,7 +734,7 @@ class FlowGenerator:
                     print('Retrieving completed tasks to local...')
                     retrieve = step.get('outputs', {}).get('artifacts', {}).get('retrieve_path', None)
                     if retrieve:
-                        download_artifact(artifact=retrieve, path=self.download_path)
+                        self._download_artifact_with_retry(artifact=retrieve, path=self.download_path)
                     props_left.remove(kk)
                 elif step['phase'] == 'Failed':
                     print(f'Sub property {kk} failed')

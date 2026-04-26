@@ -1,11 +1,58 @@
-.github
-.venv
-__pycache__
-dpdispatcher.log
-apex_flow.egg-info
+# OS / Editor
 .DS_Store
+.vscode/
+.idea/
+.github/
+
+# VCS / CI generated
 .workflow.log
-*.egg-info
+dpdispatcher.log
+
+# Python bytecode and caches
+__pycache__/
+*/__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Python tooling caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.tox/
+.nox/
+
+# Coverage / test artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.cover
+
+# Build / packaging
+build/
+dist/
+site/
+pip-wheel-metadata/
+*.egg
+*.egg-info/
+.eggs/
+apex_flow.egg-info
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Existing project rules
+.github
+
 # User-Generated Files
 reference
 relaxation

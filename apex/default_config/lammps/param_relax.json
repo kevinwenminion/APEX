@@ -4,7 +4,7 @@
             "etol": 0,
             "ftol": 1e-10,
             "maxiter": 5000,
-            "maximal": 500000
+            "maxeval": 500000
         }
     }
 }
