@@ -4,9 +4,7 @@ import copy
 import glob
 import io
 import json
-import multiprocessing
 import os
-import queue
 import re
 import shlex
 import shutil
@@ -39,6 +37,7 @@ WORKFLOW_PROGRESS_QUERY_TIMEOUT_SECONDS = 8
 WORKFLOW_QUICK_QUERY_TIMEOUT_SECONDS = 5
 WORKFLOW_DETAIL_REFRESH_SECONDS = 30
 WORKFLOW_DETAIL_QUERY_TIMEOUT_SECONDS = 25
+WORKFLOW_QUERY_RESULT_PREFIX = "__APEX_GUI_WORKFLOW_QUERY__"
 _WORKFLOW_DETAIL_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1326,44 +1325,70 @@ def _query_workflow_phase_progress(workflow_id: str, config_file: str) -> Tuple[
     return workflow_phase, progress_text
 
 
-def _query_workflow_progress_worker(result_queue, workflow_id: str, config_file: str) -> None:
-    try:
-        result_queue.put(("ok", _query_workflow_progress(workflow_id, config_file)))
-    except Exception as exc:
-        result_queue.put(("error", f"{type(exc).__name__}: {exc}"))
-
-
-def _query_workflow_phase_progress_worker(result_queue, workflow_id: str, config_file: str) -> None:
-    try:
-        result_queue.put(("ok", _query_workflow_phase_progress(workflow_id, config_file)))
-    except Exception as exc:
-        result_queue.put(("error", f"{type(exc).__name__}: {exc}"))
-
-
-def _run_query_worker_with_timeout(target, workflow_id: str, config_file: str, timeout: int):
-    try:
-        ctx = multiprocessing.get_context("fork")
-    except ValueError:
-        ctx = multiprocessing.get_context()
-    result_queue = ctx.Queue()
-    process = ctx.Process(
-        target=target,
-        args=(result_queue, workflow_id, config_file),
+def _workflow_query_subprocess_code() -> str:
+    return (
+        "import json, sys\n"
+        "from apex.gui import (\n"
+        "    WORKFLOW_QUERY_RESULT_PREFIX,\n"
+        "    _query_workflow_phase_progress,\n"
+        "    _query_workflow_progress,\n"
+        ")\n"
+        "kind, workflow_id, config_file = sys.argv[1:4]\n"
+        "try:\n"
+        "    if kind == 'phase':\n"
+        "        payload = _query_workflow_phase_progress(workflow_id, config_file)\n"
+        "    elif kind == 'detail':\n"
+        "        payload = _query_workflow_progress(workflow_id, config_file)\n"
+        "    else:\n"
+        "        raise ValueError(f'unknown workflow query kind: {kind}')\n"
+        "    result = {'ok': True, 'payload': payload}\n"
+        "except BaseException as exc:\n"
+        "    result = {'ok': False, 'error': f'{type(exc).__name__}: {exc}'}\n"
+        "print(WORKFLOW_QUERY_RESULT_PREFIX + json.dumps(result))\n"
     )
-    process.daemon = True
-    process.start()
-    process.join(timeout)
-    if process.is_alive():
-        process.terminate()
-        process.join(2)
-        raise TimeoutError(f"workflow progress query timed out after {timeout}s")
+
+
+def _parse_workflow_query_subprocess_output(stdout: str, stderr: str, returncode: int):
+    for line in reversed((stdout or "").splitlines()):
+        if line.startswith(WORKFLOW_QUERY_RESULT_PREFIX):
+            payload = json.loads(line[len(WORKFLOW_QUERY_RESULT_PREFIX):])
+            if payload.get("ok"):
+                return payload.get("payload")
+            raise RuntimeError(payload.get("error") or "workflow query failed")
+    tail = (stderr or stdout or "").strip()
+    if len(tail) > 1000:
+        tail = tail[-1000:]
+    raise RuntimeError(f"workflow query exited without a result (code {returncode}): {tail}")
+
+
+def _workflow_query_command(kind: str, workflow_id: str, config_file: str) -> List[str]:
+    return [
+        sys.executable,
+        "-c",
+        _workflow_query_subprocess_code(),
+        kind,
+        workflow_id,
+        config_file,
+    ]
+
+
+def _run_query_subprocess_with_timeout(kind: str, workflow_id: str, config_file: str, timeout: int):
     try:
-        status, payload = result_queue.get_nowait()
-    except queue.Empty as exc:
-        raise RuntimeError(f"workflow progress query exited without a result (code {process.exitcode})") from exc
-    if status == "error":
-        raise RuntimeError(payload)
-    return payload
+        completed = subprocess.run(
+            _workflow_query_command(kind, workflow_id, config_file),
+            cwd=os.getcwd(),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(f"workflow progress query timed out after {timeout}s") from exc
+    return _parse_workflow_query_subprocess_output(
+        completed.stdout,
+        completed.stderr,
+        completed.returncode,
+    )
 
 
 def _query_workflow_phase_progress_with_timeout(
@@ -1371,12 +1396,12 @@ def _query_workflow_phase_progress_with_timeout(
         config_file: str,
         timeout: int = WORKFLOW_QUICK_QUERY_TIMEOUT_SECONDS,
 ) -> Tuple[str, str]:
-    return _run_query_worker_with_timeout(
-        _query_workflow_phase_progress_worker,
+    return tuple(_run_query_subprocess_with_timeout(
+        "phase",
         workflow_id,
         config_file,
         timeout,
-    )
+    ))
 
 
 def _query_workflow_progress_with_timeout(
@@ -1384,12 +1409,14 @@ def _query_workflow_progress_with_timeout(
         config_file: str,
         timeout: int = WORKFLOW_PROGRESS_QUERY_TIMEOUT_SECONDS,
 ) -> Tuple[Dict[str, int], str, str]:
-    return _run_query_worker_with_timeout(
-        _query_workflow_progress_worker,
+    payload = _run_query_subprocess_with_timeout(
+        "detail",
         workflow_id,
         config_file,
         timeout,
     )
+    counts, workflow_phase, progress_text = payload
+    return counts, workflow_phase, progress_text
 
 
 def _workflow_progress_percent(progress_text: str) -> int:
@@ -1408,19 +1435,14 @@ def _workflow_detail_cache_key(workflow_id: str, config_file: str) -> Tuple[str,
 
 
 def _start_workflow_detail_query(entry: Dict[str, Any], workflow_id: str, config_file: str, now: float) -> None:
-    try:
-        ctx = multiprocessing.get_context("fork")
-    except ValueError:
-        ctx = multiprocessing.get_context()
-    result_queue = ctx.Queue()
-    process = ctx.Process(
-        target=_query_workflow_progress_worker,
-        args=(result_queue, workflow_id, config_file),
+    process = subprocess.Popen(
+        _workflow_query_command("detail", workflow_id, config_file),
+        cwd=os.getcwd(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
-    process.daemon = True
-    process.start()
     entry["process"] = process
-    entry["queue"] = result_queue
     entry["started_at"] = now
     entry["last_start_at"] = now
     entry["running"] = True
@@ -1428,35 +1450,34 @@ def _start_workflow_detail_query(entry: Dict[str, Any], workflow_id: str, config
 
 def _poll_workflow_detail_cache(entry: Dict[str, Any], now: float) -> None:
     process = entry.get("process")
-    result_queue = entry.get("queue")
     if process is None:
         return
-    if process.is_alive():
+    if process.poll() is None:
         started_at = entry.get("started_at", now)
         if now - started_at > WORKFLOW_DETAIL_QUERY_TIMEOUT_SECONDS:
             process.terminate()
-            process.join(2)
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
             entry["error"] = f"detail query timed out after {WORKFLOW_DETAIL_QUERY_TIMEOUT_SECONDS}s"
             entry["running"] = False
             entry.pop("process", None)
-            entry.pop("queue", None)
         return
     try:
-        status, payload = result_queue.get_nowait() if result_queue is not None else ("error", "detail query exited without a result")
-    except queue.Empty:
-        status, payload = "error", f"detail query exited without a result (code {process.exitcode})"
-    if status == "ok":
+        stdout, stderr = process.communicate(timeout=1)
+        payload = _parse_workflow_query_subprocess_output(stdout, stderr, process.returncode)
         counts, workflow_phase, raw_progress = payload
         entry["counts"] = counts
         entry["workflow_phase"] = workflow_phase
         entry["raw_progress"] = raw_progress
         entry["updated_at"] = now
         entry.pop("error", None)
-    else:
-        entry["error"] = payload
+    except Exception as exc:
+        entry["error"] = str(exc)
     entry["running"] = False
     entry.pop("process", None)
-    entry.pop("queue", None)
 
 
 def _get_workflow_detail_cache(workflow_id: str, config_file: str, now: Optional[float] = None) -> Dict[str, Any]:
