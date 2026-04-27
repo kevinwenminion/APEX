@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import uuid
 import webbrowser
 import zipfile
 from datetime import datetime
@@ -32,7 +33,9 @@ RETRIEVE_RUNNING_MESSAGE = "正在提取文件中..."
 BLOCKED_INLINE_COMMANDS = {"gui"}
 DEFAULT_SUBMIT_COMMAND = "nohup apex submit param.json -c global.json > apex.log 2>&1 &"
 SUBMIT_STATUS_FILE = ".apex-submit.status"
+SUBMIT_GROUP_META_FILE = ".apex-submit-group.json"
 SUBMIT_RUNNING_NOTICE = "任务已提交，正在运行，详情请转到Log页面查看"
+SUBMIT_BATCH_SIZE = 100
 PARAM_FALLBACK_PATTERN = "*param*.json"
 WORKFLOW_PROGRESS_QUERY_TIMEOUT_SECONDS = 8
 WORKFLOW_QUICK_QUERY_TIMEOUT_SECONDS = 5
@@ -496,18 +499,33 @@ def _run_apex_command_in_background(
 def _start_retrieve_in_background(workdir: str, workflow_id: str, global_file: str) -> Dict[str, Any]:
     log_file = os.path.join(workdir, "apex-retrieve.log")
     status_file = os.path.join(workdir, ".apex-retrieve.status")
-    command = [
-        sys.executable,
-        "-m",
-        "apex",
-        "retrieve",
-        "-i",
-        workflow_id,
-        "-w",
-        workdir,
-        "-c",
-        global_file,
-    ]
+    workflow_ids = _parse_workflow_ids(workflow_id)
+    if not workflow_ids:
+        return {
+            "ok": False,
+            "message": "Workflow ID is required for retrieve.",
+            "command": "",
+            "returncode": "",
+            "stdout": "",
+            "stderr": "",
+            "finished_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    wrapper_code = (
+        "import subprocess, sys\n"
+        "workdir, global_file, log_file, status_file = sys.argv[1:5]\n"
+        "workflow_ids = sys.argv[5:]\n"
+        "codes = []\n"
+        "with open(log_file, 'a', encoding='utf-8') as log_fp:\n"
+        "    for idx, workflow_id in enumerate(workflow_ids, start=1):\n"
+        "        log_fp.write(f'[apex-gui] retrieve workflow {idx}/{len(workflow_ids)}: {workflow_id}\\n')\n"
+        "        log_fp.flush()\n"
+        "        args = [sys.executable, '-m', 'apex', 'retrieve', '-i', workflow_id, '-w', workdir, '-c', global_file]\n"
+        "        codes.append(subprocess.call(args, stdout=log_fp, stderr=subprocess.STDOUT, cwd=workdir, text=True))\n"
+        "final_code = 0 if all(code == 0 for code in codes) else 1\n"
+        "with open(status_file, 'w', encoding='utf-8') as fp:\n"
+        "    fp.write(str(final_code))\n"
+    )
+    command = [sys.executable, "-c", wrapper_code, workdir, global_file, log_file, status_file] + workflow_ids
     display_cmd = " ".join(shlex.quote(token) for token in command)
     shell_cmd = (
         f"rm -f {shlex.quote(status_file)}; "
@@ -545,7 +563,8 @@ def _start_retrieve_in_background(workdir: str, workflow_id: str, global_file: s
         "finished_at": datetime.now().isoformat(timespec="seconds"),
         "pid": pid,
         "workdir": workdir,
-        "workflow_id": workflow_id,
+        "workflow_id": _format_workflow_ids(workflow_ids),
+        "workflow_ids": workflow_ids,
         "global_file": global_file,
         "log_file": log_file,
         "status_file": status_file,
@@ -761,6 +780,10 @@ DEFAULT_ACCOUNT_STATE = _load_account_state()
 DEFAULT_SUBMIT_STATE = {
     "workdir": os.getcwd(),
     "workflow_id": "",
+    "workflow_ids": [],
+    "workflow_group_id": "",
+    "workflow_group_size": 0,
+    "workflow_group_total_confs": 0,
     "global_file": "global.json",
     "param_file": "param.json",
 }
@@ -1309,6 +1332,180 @@ def _read_latest_workflow_id(workdir: str) -> str:
     return record.split("\t")[0].strip()
 
 
+def _parse_workflow_ids(value: Any) -> List[str]:
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = re.split(r"[\s,]+", str(value or ""))
+    workflow_ids: List[str] = []
+    for item in raw_items:
+        clean = str(item or "").strip()
+        if clean and clean not in workflow_ids:
+            workflow_ids.append(clean)
+    return workflow_ids
+
+
+def _format_workflow_ids(workflow_ids: List[str]) -> str:
+    return ", ".join([item for item in workflow_ids if item])
+
+
+def _workflow_log_records(workdir: str) -> List[Dict[str, str]]:
+    log_path = os.path.join(workdir, ".workflow.log")
+    if not os.path.isfile(log_path):
+        return []
+    records: List[Dict[str, str]] = []
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 4:
+                    continue
+                records.append(
+                    {
+                        "workflow_id": parts[0].strip(),
+                        "operation": parts[1].strip(),
+                        "timestamp": parts[2].strip(),
+                        "workdir": parts[3].strip(),
+                    }
+                )
+    except OSError:
+        return []
+    return records
+
+
+def _count_workflow_log_records(workdir: str) -> int:
+    return len(_workflow_log_records(workdir))
+
+
+def _submit_meta_path(workdir: str) -> str:
+    return os.path.join(_normalize_workdir(workdir), SUBMIT_GROUP_META_FILE)
+
+
+def _load_submit_group_metadata(workdir: str) -> Dict[str, Any]:
+    meta_path = _submit_meta_path(workdir)
+    if not os.path.isfile(meta_path):
+        return {}
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_submit_group_metadata(workdir: str, payload: Dict[str, Any]) -> None:
+    meta_path = _submit_meta_path(workdir)
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=4, ensure_ascii=False)
+        f.write("\n")
+
+
+def _sanitize_workflow_label_value(value: str, fallback: str = "apex-gui") -> str:
+    clean = re.sub(r"[^a-z0-9.-]+", "-", str(value or "").strip().lower()).strip("-.")
+    return clean[:63] or fallback
+
+
+def _build_submit_group_id() -> str:
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    suffix = uuid.uuid4().hex[:8]
+    return f"apex-gui-{timestamp}-{suffix}"
+
+
+def _derive_batch_param_filename(param_file: str, index: int, total: int) -> str:
+    base, ext = os.path.splitext(param_file)
+    suffix = f".batch-{index:03d}-of-{total:03d}"
+    if ext:
+        return f"{base}{suffix}{ext}"
+    return f"{param_file}{suffix}.json"
+
+
+def _resolve_structures_for_submit(workdir: str, structures: List[str]) -> List[str]:
+    try:
+        from apex.submit import _glob_structures_in_work_dir
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load submit structure resolver: {exc}") from exc
+
+    resolved: List[str] = []
+    for pattern in structures or []:
+        matches = _glob_structures_in_work_dir(workdir, pattern)
+        for match in matches:
+            if match not in resolved:
+                resolved.append(match)
+    return resolved
+
+
+def _build_submit_batches(
+    workdir: str,
+    param_payload: Dict[str, Any],
+    param_file: str,
+    batch_size: int = SUBMIT_BATCH_SIZE,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    resolved_structures = _resolve_structures_for_submit(workdir, param_payload.get("structures", []))
+    if not resolved_structures:
+        raise RuntimeError(
+            f"No structures matched the submitted patterns under {workdir}: "
+            f"{param_payload.get('structures', [])}"
+        )
+
+    batches: List[Dict[str, Any]] = []
+    total_batches = max(1, (len(resolved_structures) + batch_size - 1) // batch_size)
+    for batch_index in range(total_batches):
+        batch_structures = resolved_structures[batch_index * batch_size:(batch_index + 1) * batch_size]
+        batch_payload = copy.deepcopy(param_payload)
+        batch_payload["structures"] = batch_structures
+        batch_file = param_file if total_batches == 1 else _derive_batch_param_filename(param_file, batch_index + 1, total_batches)
+        batches.append(
+            {
+                "index": batch_index + 1,
+                "param_file": batch_file,
+                "structures": batch_structures,
+                "payload": batch_payload,
+            }
+        )
+    return batches, resolved_structures
+
+
+def _merge_workflow_ids(*groups: Any) -> List[str]:
+    merged: List[str] = []
+    for group in groups:
+        for workflow_id in _parse_workflow_ids(group):
+            if workflow_id not in merged:
+                merged.append(workflow_id)
+    return merged
+
+
+def _discover_group_workflow_ids(workdir: str, meta: Dict[str, Any]) -> List[str]:
+    if not meta:
+        return []
+    records = _workflow_log_records(workdir)
+    start_index = int(meta.get("workflow_log_line_start", 0) or 0)
+    expected = int(meta.get("expected_batches", 0) or 0)
+    normalized_workdir = _normalize_workdir(workdir)
+    discovered: List[str] = []
+    for record in records[start_index:]:
+        if _normalize_workdir(record.get("workdir", "")) != normalized_workdir:
+            continue
+        workflow_id = record.get("workflow_id", "").strip()
+        if workflow_id and workflow_id not in discovered:
+            discovered.append(workflow_id)
+        if expected and len(discovered) >= expected:
+            break
+    return discovered
+
+
+def _sync_submit_group_metadata_ids(workdir: str, meta: Dict[str, Any]) -> Dict[str, Any]:
+    if not meta:
+        return {}
+    discovered = _discover_group_workflow_ids(workdir, meta)
+    stored = _parse_workflow_ids(meta.get("workflow_ids", []))
+    merged = _merge_workflow_ids(stored, discovered)
+    if merged != stored:
+        meta = copy.deepcopy(meta)
+        meta["workflow_ids"] = merged
+        _save_submit_group_metadata(workdir, meta)
+    return meta
+
+
 def _tail_text_file(path: str, max_chars: int = 1600) -> str:
     if not path or not os.path.isfile(path):
         return ""
@@ -1549,6 +1746,57 @@ def _query_workflow_progress_with_timeout(
     return counts, workflow_phase, progress_text
 
 
+def _query_many_workflow_phase_progress(workflow_ids: List[str], config_file: str) -> Dict[str, Tuple[str, str]]:
+    results: Dict[str, Tuple[str, str]] = {}
+    for workflow_id in workflow_ids:
+        results[workflow_id] = _query_workflow_phase_progress(workflow_id, config_file)
+    return results
+
+
+def _query_many_workflow_phase_progress_with_timeout(
+        workflow_ids: List[str],
+        config_file: str,
+        timeout: Optional[int] = None,
+) -> Dict[str, Tuple[str, str]]:
+    safe_ids = _parse_workflow_ids(workflow_ids)
+    if not safe_ids:
+        return {}
+    payload = (
+        "import json, sys\n"
+        "from apex.gui import WORKFLOW_QUERY_RESULT_PREFIX, _query_many_workflow_phase_progress\n"
+        "workflow_ids = json.loads(sys.argv[1])\n"
+        "config_file = sys.argv[2]\n"
+        "try:\n"
+        "    result = {'ok': True, 'payload': _query_many_workflow_phase_progress(workflow_ids, config_file)}\n"
+        "except BaseException as exc:\n"
+        "    result = {'ok': False, 'error': f'{type(exc).__name__}: {exc}'}\n"
+        "print(WORKFLOW_QUERY_RESULT_PREFIX + json.dumps(result))\n"
+    )
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", payload, json.dumps(safe_ids), config_file],
+            cwd=os.getcwd(),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout or max(WORKFLOW_QUICK_QUERY_TIMEOUT_SECONDS, min(20, len(safe_ids) * 3)),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(f"workflow progress query timed out after {timeout or max(WORKFLOW_QUICK_QUERY_TIMEOUT_SECONDS, min(20, len(safe_ids) * 3))}s") from exc
+    raw_payload = _parse_workflow_query_subprocess_output(
+        completed.stdout,
+        completed.stderr,
+        completed.returncode,
+    )
+    if not isinstance(raw_payload, dict):
+        return {}
+    return {
+        workflow_id: tuple(value)
+        for workflow_id, value in raw_payload.items()
+        if workflow_id in safe_ids and isinstance(value, (list, tuple)) and len(value) == 2
+    }
+
+
 def _workflow_progress_percent(progress_text: str) -> int:
     match = re.search(r"(\d+)\s*/\s*(\d+)", progress_text or "")
     if not match:
@@ -1558,6 +1806,30 @@ def _workflow_progress_percent(progress_text: str) -> int:
     if total <= 0:
         return 0
     return max(0, min(100, int(round((current / total) * 100))))
+
+
+def _workflow_progress_fraction(progress_text: str) -> Tuple[int, int]:
+    match = re.search(r"(\d+)\s*/\s*(\d+)", progress_text or "")
+    if not match:
+        return 0, 0
+    current = int(match.group(1))
+    total = int(match.group(2))
+    if total <= 0:
+        return 0, 0
+    return current, total
+
+
+def _aggregate_progress_fraction(progress_texts: List[str]) -> Tuple[int, int, int]:
+    current_total = 0
+    grand_total = 0
+    for progress_text in progress_texts or []:
+        current, total = _workflow_progress_fraction(progress_text)
+        current_total += current
+        grand_total += total
+    if grand_total <= 0:
+        return 0, 0, 0
+    percent = max(0, min(100, int(round((current_total / grand_total) * 100))))
+    return current_total, grand_total, percent
 
 
 def _workflow_detail_cache_key(workflow_id: str, config_file: str) -> Tuple[str, str]:
@@ -1621,29 +1893,61 @@ def _get_workflow_detail_cache(workflow_id: str, config_file: str, now: Optional
     return entry
 
 
-def _build_submit_shell_command(param_file: str, global_file: str) -> Tuple[str, str]:
+def _submit_wrapper_code() -> str:
+    return (
+        "import json, os, subprocess, sys\n"
+        "meta_path, log_file, status_file = sys.argv[1:4]\n"
+        "with open(meta_path, 'r', encoding='utf-8') as fp:\n"
+        "    meta = json.load(fp)\n"
+        "jobs = meta.get('submit_jobs', [])\n"
+        "os.makedirs(os.path.dirname(log_file) or '.', exist_ok=True)\n"
+        "exit_codes = []\n"
+        "with open(log_file, 'a', encoding='utf-8') as log_fp:\n"
+        "    log_fp.write(f\"[apex-gui] submit group {meta.get('group_id', '')} start\\n\")\n"
+        "    log_fp.flush()\n"
+        "    procs = []\n"
+        "    for job in jobs:\n"
+        "        args = [sys.executable, '-m', 'apex', 'submit', job['param_file'], '-c', job['global_file'], '-s', '-n', job['workflow_name']]\n"
+        "        for label in job.get('labels', []):\n"
+        "            args.extend(['-l', label])\n"
+        "        log_fp.write(f\"[apex-gui] launch batch {job.get('batch_index')}/{job.get('batch_total')}: {' '.join(args)}\\n\")\n"
+        "        log_fp.flush()\n"
+        "        procs.append((job, subprocess.Popen(args, stdout=log_fp, stderr=subprocess.STDOUT, cwd=job['workdir'], text=True)))\n"
+        "    for job, proc in procs:\n"
+        "        code = proc.wait()\n"
+        "        exit_codes.append(code)\n"
+        "        log_fp.write(f\"[apex-gui] batch {job.get('batch_index')}/{job.get('batch_total')} exited with code {code}\\n\")\n"
+        "        log_fp.flush()\n"
+        "    final_code = 0 if all(code == 0 for code in exit_codes) else 1\n"
+        "    log_fp.write(f\"[apex-gui] submit group done with code {final_code}\\n\")\n"
+        "    log_fp.flush()\n"
+        "with open(status_file, 'w', encoding='utf-8') as fp:\n"
+        "    fp.write(str(0 if not exit_codes else (0 if all(code == 0 for code in exit_codes) else 1)))\n"
+    )
+
+
+def _build_submit_shell_command(meta_path: str, cwd: str) -> Tuple[str, str]:
+    log_file = os.path.join(cwd, "apex.log")
+    status_file = os.path.join(cwd, SUBMIT_STATUS_FILE)
     submit_inner = (
-        f"{shlex.quote(sys.executable)} -m apex submit "
-        f"{shlex.quote(param_file)} -c {shlex.quote(global_file)} -s"
+        f"{shlex.quote(sys.executable)} -c {shlex.quote(_submit_wrapper_code())} "
+        f"{shlex.quote(meta_path)} {shlex.quote(log_file)} {shlex.quote(status_file)}"
     )
-    display_cmd = f"nohup {submit_inner} > apex.log 2>&1 &"
-    wrapped = (
-        f"{submit_inner} > apex.log 2>&1; "
-        f"code=$?; printf \"%s\" \"$code\" > {shlex.quote(SUBMIT_STATUS_FILE)}"
-    )
+    display_cmd = f"nohup {submit_inner} > /dev/null 2>&1 &"
     shell_cmd = (
-        f"rm -f {shlex.quote(SUBMIT_STATUS_FILE)}; "
-        f"nohup bash -lc {shlex.quote(wrapped)} >/dev/null 2>&1 & echo $!"
+        f"rm -f {shlex.quote(status_file)}; "
+        f"nohup bash -lc {shlex.quote(submit_inner)} >/dev/null 2>&1 & echo $!"
     )
     return shell_cmd, display_cmd
 
 
-def _run_submit_in_background(param_file: str, global_file: str, cwd: Optional[str] = None) -> Dict[str, Any]:
-    shell_cmd, display_cmd = _build_submit_shell_command(param_file, global_file)
+def _run_submit_in_background(meta_path: str, cwd: Optional[str] = None) -> Dict[str, Any]:
+    target_cwd = cwd or os.getcwd()
+    shell_cmd, display_cmd = _build_submit_shell_command(meta_path, target_cwd)
     try:
         completed = subprocess.run(
             ["bash", "-lc", shell_cmd],
-            cwd=cwd or os.getcwd(),
+            cwd=target_cwd,
             capture_output=True,
             text=True,
             check=False,
@@ -1663,7 +1967,7 @@ def _run_submit_in_background(param_file: str, global_file: str, cwd: Optional[s
     message = "Submit started in background."
     if pid:
         message += f" PID: {pid}."
-    message += " Saved files: param.json, global.json. Log file: apex.log"
+    message += f" Submit metadata: {os.path.basename(meta_path)}. Log file: apex.log"
 
     return {
         "ok": completed.returncode == 0,
@@ -1674,7 +1978,7 @@ def _run_submit_in_background(param_file: str, global_file: str, cwd: Optional[s
         "stdout": completed.stdout.strip(),
         "stderr": completed.stderr.strip(),
         "finished_at": datetime.now().isoformat(timespec="seconds"),
-        "status_file": os.path.join(cwd or os.getcwd(), SUBMIT_STATUS_FILE),
+        "status_file": os.path.join(target_cwd, SUBMIT_STATUS_FILE),
     }
 
 
@@ -1782,11 +2086,27 @@ def _write_submit_json_files(
 def _cleanup_reset_logs(workdir: str, filenames: Optional[List[str]] = None) -> List[str]:
     target_dir = _normalize_workdir(workdir)
     removed: List[str] = []
+    meta = _load_submit_group_metadata(target_dir)
+    base_param_file = str(meta.get("param_file", "") or "")
+    batch_param_files = [
+        item.get("param_file", "")
+        for item in meta.get("submit_jobs", [])
+        if isinstance(item, dict) and item.get("param_file") and item.get("param_file") != base_param_file
+    ]
     for name in filenames or ["dpdispatcher.log", ".workflow.log", "apex.log", "apex-report.log", ".apex-submit.status",".apex-retrieve.status","apex-retrieve.log"]:
         target_path = os.path.join(target_dir, name)
         if os.path.isfile(target_path):
             os.remove(target_path)
             removed.append(name)
+    meta_path = _submit_meta_path(target_dir)
+    if os.path.isfile(meta_path):
+        os.remove(meta_path)
+        removed.append(os.path.basename(meta_path))
+    for rel_path in batch_param_files:
+        target_path = _resolve_file_path(target_dir, rel_path)
+        if target_path and os.path.isfile(target_path):
+            os.remove(target_path)
+            removed.append(rel_path)
     return removed
 
 
@@ -2204,11 +2524,11 @@ class ApexGuiApp:
                                     placeholder="global.json",
                                 ),
                                 html.Br(),
-                                dbc.Label("Workflow ID (留空时自动从 .workflow.log 读取)"),
+                                dbc.Label("Workflow ID(s) (留空时自动从 .workflow.log 读取，可填多个，逗号分隔)"),
                                 dbc.Input(
                                     id="submit-workflow-id",
                                     value="",
-                                    placeholder="例如: wf-xxxx",
+                                    placeholder="例如: wf-xxxx, wf-yyyy",
                                 ),
                                 html.Br(),
                                 dbc.Button("Reset", id="submit-reset", color="secondary", className="me-2"),
@@ -2747,6 +3067,10 @@ class ApexGuiApp:
             if triggered_id == "submit-reset":
                 removed_logs = _cleanup_reset_logs(workdir)
                 state_payload["workflow_id"] = ""
+                state_payload["workflow_ids"] = []
+                state_payload["workflow_group_id"] = ""
+                state_payload["workflow_group_size"] = 0
+                state_payload["workflow_group_total_confs"] = 0
                 if removed_logs:
                     message = f"Reset completed. Removed files in {workdir}: " + ", ".join(removed_logs)
                 else:
@@ -2767,7 +3091,64 @@ class ApexGuiApp:
                     incar_content=submit_incar_content,
                     workdir=workdir,
                 )
+                try:
+                    batch_specs, resolved_structures = _build_submit_batches(workdir, param_payload, param_file)
+                except Exception as exc:
+                    return _build_feedback(f"Submit preparation failed: {exc}"), False, default_confirm_message, state_payload, current_workflow_id
                 _write_submit_json_files(global_payload, param_payload, workdir, global_file, param_file)
+                batch_param_files: List[str] = []
+                for batch_spec in batch_specs:
+                    batch_file = batch_spec["param_file"]
+                    if batch_file == param_file:
+                        continue
+                    _write_submit_json_files(global_payload, batch_spec["payload"], workdir, global_file, batch_file)
+                    batch_param_files.append(batch_file)
+                workflow_log_line_start = _count_workflow_log_records(workdir)
+                group_id = _build_submit_group_id()
+                workdir_label = _sanitize_workflow_label_value(os.path.basename(workdir) or "workdir")
+                total_batches = len(batch_specs)
+                group_meta = {
+                    "group_id": group_id,
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
+                    "workdir": workdir,
+                    "global_file": global_file,
+                    "param_file": param_file,
+                    "batch_size": SUBMIT_BATCH_SIZE,
+                    "total_confs": len(resolved_structures),
+                    "expected_batches": total_batches,
+                    "workflow_log_line_start": workflow_log_line_start,
+                    "workflow_ids": [],
+                    "submit_jobs": [],
+                }
+                base_workflow_name = f"apex-gui-{workdir_label}-{group_id[-8:]}"
+                for batch_spec in batch_specs:
+                    batch_index = batch_spec["index"]
+                    batch_tag = f"{batch_index:03d}-of-{total_batches:03d}"
+                    labels = [
+                        f"apex_gui_group={group_id}",
+                        f"apex_gui_workdir={workdir_label}",
+                        f"apex_gui_batch={batch_tag}",
+                        "apex_gui_source=gui",
+                    ]
+                    workflow_name = f"{base_workflow_name}-batch-{batch_index:03d}"
+                    group_meta["submit_jobs"].append(
+                        {
+                            "batch_index": batch_index,
+                            "batch_total": total_batches,
+                            "param_file": batch_spec["param_file"],
+                            "global_file": global_file,
+                            "workflow_name": workflow_name,
+                            "labels": labels,
+                            "workdir": workdir,
+                            "conf_count": len(batch_spec["structures"]),
+                        }
+                    )
+                _save_submit_group_metadata(workdir, group_meta)
+                state_payload["workflow_id"] = ""
+                state_payload["workflow_ids"] = []
+                state_payload["workflow_group_id"] = group_id
+                state_payload["workflow_group_size"] = total_batches
+                state_payload["workflow_group_total_confs"] = len(resolved_structures)
 
             if triggered_id == "submit-run":
                 if os.path.exists(os.path.join(workdir, "apex.log")):
@@ -2777,53 +3158,81 @@ class ApexGuiApp:
                     )
                     return warning, True, default_confirm_message, state_payload, current_workflow_id
 
-                run_feedback = _run_submit_in_background(param_file, global_file, cwd=workdir)
+                run_feedback = _run_submit_in_background(_submit_meta_path(workdir), cwd=workdir)
                 if run_feedback.get("ok"):
-                    run_feedback["message"] = f"{run_feedback.get('message', '').rstrip()}\n{SUBMIT_RUNNING_NOTICE}"
+                    batch_count = state_payload.get("workflow_group_size", 0)
+                    conf_count = state_payload.get("workflow_group_total_confs", 0)
+                    run_feedback["message"] = (
+                        f"{run_feedback.get('message', '').rstrip()}\n"
+                        f"{SUBMIT_RUNNING_NOTICE}\n"
+                        f"Detected {conf_count} confs; split into {batch_count} workflow batch(es) with at most {SUBMIT_BATCH_SIZE} confs each."
+                    )
                 if created_files:
                     extra_line = "Auto-created default files: " + ", ".join(created_files)
                     run_feedback["message"] = f"{run_feedback.get('message', '').rstrip()}\n{extra_line}"
-                latest_workflow_id = _read_latest_workflow_id(workdir)
-                if latest_workflow_id:
-                    state_payload["workflow_id"] = latest_workflow_id
-                return run_feedback, False, default_confirm_message, state_payload, latest_workflow_id or current_workflow_id
+                if batch_param_files:
+                    run_feedback["message"] = (
+                        f"{run_feedback.get('message', '').rstrip()}\n"
+                        f"Batch param files: {', '.join(batch_param_files)}"
+                    )
+                return run_feedback, False, default_confirm_message, state_payload, ""
 
             if triggered_id == "submit-confirm-dialog":
-                run_feedback = _run_submit_in_background(param_file, global_file, cwd=workdir)
+                run_feedback = _run_submit_in_background(_submit_meta_path(workdir), cwd=workdir)
                 if run_feedback.get("ok"):
-                    run_feedback["message"] = f"{run_feedback.get('message', '').rstrip()}\n{SUBMIT_RUNNING_NOTICE}"
+                    batch_count = state_payload.get("workflow_group_size", 0)
+                    conf_count = state_payload.get("workflow_group_total_confs", 0)
+                    run_feedback["message"] = (
+                        f"{run_feedback.get('message', '').rstrip()}\n"
+                        f"{SUBMIT_RUNNING_NOTICE}\n"
+                        f"Detected {conf_count} confs; split into {batch_count} workflow batch(es) with at most {SUBMIT_BATCH_SIZE} confs each."
+                    )
                 if created_files:
                     extra_line = "Auto-created default files: " + ", ".join(created_files)
                     run_feedback["message"] = f"{run_feedback.get('message', '').rstrip()}\n{extra_line}"
-                latest_workflow_id = _read_latest_workflow_id(workdir)
-                if latest_workflow_id:
-                    state_payload["workflow_id"] = latest_workflow_id
-                return run_feedback, False, default_confirm_message, state_payload, latest_workflow_id or current_workflow_id
+                if batch_param_files:
+                    run_feedback["message"] = (
+                        f"{run_feedback.get('message', '').rstrip()}\n"
+                        f"Batch param files: {', '.join(batch_param_files)}"
+                    )
+                return run_feedback, False, default_confirm_message, state_payload, ""
 
             if triggered_id == "submit-finalize":
-                workflow_id = current_workflow_id or state_payload.get("workflow_id", "") or _read_latest_workflow_id(workdir)
-                if not workflow_id:
+                workflow_ids = _merge_workflow_ids(
+                    current_workflow_id,
+                    state_payload.get("workflow_ids", []),
+                    state_payload.get("workflow_id", ""),
+                )
+                if not workflow_ids:
+                    meta = _sync_submit_group_metadata_ids(workdir, _load_submit_group_metadata(workdir))
+                    workflow_ids = _merge_workflow_ids(workflow_ids, meta.get("workflow_ids", []))
+                if not workflow_ids:
+                    workflow_ids = _merge_workflow_ids(_read_latest_workflow_id(workdir))
+                workflow_id_text = _format_workflow_ids(workflow_ids)
+                if not workflow_ids:
                     feedback = _build_feedback("Workflow ID is required for retrieve/report. Fill it or submit first.")
                     return feedback, False, default_confirm_message, state_payload, ""
                 if _retrieve_state_is_active(retrieve_state):
                     active_workflow_id = ""
                     if isinstance(retrieve_state, dict):
-                        active_workflow_id = retrieve_state.get("workflow_id", "") or workflow_id
+                        active_workflow_id = retrieve_state.get("workflow_id", "") or workflow_id_text
                     feedback = _build_feedback(
                         f"Retrieve is already running for workflow {active_workflow_id}. "
                         "Wait for it to finish before starting another Retrieve + Report.",
                         ok=False,
                     )
-                    state_payload["workflow_id"] = active_workflow_id or workflow_id
-                    return feedback, False, default_confirm_message, state_payload, active_workflow_id or workflow_id
+                    state_payload["workflow_id"] = active_workflow_id or workflow_id_text
+                    state_payload["workflow_ids"] = workflow_ids
+                    return feedback, False, default_confirm_message, state_payload, active_workflow_id or workflow_id_text
 
                 final_feedback = _start_retrieve_in_background(
                     workdir=workdir,
-                    workflow_id=workflow_id,
+                    workflow_id=workflow_id_text,
                     global_file=global_file,
                 )
-                state_payload["workflow_id"] = workflow_id
-                return final_feedback, False, default_confirm_message, state_payload, workflow_id
+                state_payload["workflow_id"] = workflow_id_text
+                state_payload["workflow_ids"] = workflow_ids
+                return final_feedback, False, default_confirm_message, state_payload, workflow_id_text
 
             if triggered_id == "advanced-run":
                 if not advanced_command or not advanced_command.strip():
@@ -2891,14 +3300,26 @@ class ApexGuiApp:
             state_payload["workdir"] = workdir
             global_file = (submit_global_file or state_payload.get("global_file") or "global.json").strip()
             state_payload["global_file"] = global_file
+            meta = _sync_submit_group_metadata_ids(workdir, _load_submit_group_metadata(workdir))
+            if meta:
+                state_payload["workflow_group_id"] = meta.get("group_id", "")
+                state_payload["workflow_group_size"] = int(meta.get("expected_batches", 0) or 0)
+                state_payload["workflow_group_total_confs"] = int(meta.get("total_confs", 0) or 0)
 
-            workflow_id = (submit_workflow_id or "").strip()
-            if not workflow_id:
-                workflow_id = _read_latest_workflow_id(workdir) or state_payload.get("workflow_id", "")
-            if workflow_id:
-                state_payload["workflow_id"] = workflow_id
+            workflow_ids = _merge_workflow_ids(
+                submit_workflow_id,
+                state_payload.get("workflow_ids", []),
+                state_payload.get("workflow_id", ""),
+                meta.get("workflow_ids", []) if meta else [],
+            )
+            if not workflow_ids:
+                workflow_ids = _merge_workflow_ids(_read_latest_workflow_id(workdir))
+            workflow_id_text = _format_workflow_ids(workflow_ids)
+            if workflow_ids:
+                state_payload["workflow_ids"] = workflow_ids
+                state_payload["workflow_id"] = workflow_id_text
 
-            if not workflow_id:
+            if not workflow_ids:
                 updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 status_path = os.path.join(workdir, SUBMIT_STATUS_FILE)
                 status_code = _tail_text_file(status_path, max_chars=32)
@@ -2919,8 +3340,19 @@ class ApexGuiApp:
                     return (
                         0,
                         "0%",
-                        f"正在提交，等待 .workflow.log 生成 | Last updated: {updated_at}",
+                        f"正在提交，等待 workflow id 生成 | Last updated: {updated_at}",
                         "Submit process is still running or uploading inputs. Check apex.log for live output.",
+                        state_payload,
+                        "",
+                    )
+                if meta:
+                    pending = int(meta.get("expected_batches", 0) or 0)
+                    total_confs = int(meta.get("total_confs", 0) or 0)
+                    return (
+                        0,
+                        "0%",
+                        f"批量提交已准备完成，等待 workflow id 注册 | Group: {meta.get('group_id', '')} | Last updated: {updated_at}",
+                        f"Confs: {total_confs} | Expected workflows: {pending} | Registered: 0",
                         state_payload,
                         "",
                     )
@@ -2942,11 +3374,11 @@ class ApexGuiApp:
                     f"缺少配置文件: {config_path} | Last updated: {updated_at}",
                     "Total: 0 | Running: 0 | Finished: 0",
                     state_payload,
-                    workflow_id,
+                    workflow_id_text,
                 )
 
             try:
-                workflow_phase, raw_progress = _query_workflow_phase_progress_with_timeout(workflow_id, config_path)
+                phase_results = _query_many_workflow_phase_progress_with_timeout(workflow_ids, config_path)
             except TimeoutError as exc:
                 return (
                     0,
@@ -2954,7 +3386,7 @@ class ApexGuiApp:
                     f"远端进度查询超时: {exc} | Last updated: {updated_at}",
                     "Total: 0 | Running: 0 | Finished: 0",
                     state_payload,
-                    workflow_id,
+                    workflow_id_text,
                 )
             except Exception as exc:
                 return (
@@ -2963,43 +3395,80 @@ class ApexGuiApp:
                     f"无法查询 workflow 进度: {exc} | Last updated: {updated_at}",
                     "Total: 0 | Running: 0 | Finished: 0",
                     state_payload,
-                    workflow_id,
+                    workflow_id_text,
                 )
+            workflow_phases: Dict[str, int] = {}
+            progress_texts: List[str] = []
+            for workflow_id in workflow_ids:
+                workflow_phase, raw_progress = phase_results.get(workflow_id, ("Unknown", ""))
+                workflow_phases[workflow_phase] = workflow_phases.get(workflow_phase, 0) + 1
+                if raw_progress:
+                    progress_texts.append(raw_progress)
 
-            detail_cache = _get_workflow_detail_cache(workflow_id, config_path)
-            percent = _workflow_progress_percent(raw_progress)
-            phase_text = f"Workflow {workflow_id} | Phase: {workflow_phase} | Last updated: {updated_at}"
-            if raw_progress:
-                phase_text += f" | Progress: {raw_progress}"
+            current_total, grand_total, percent = _aggregate_progress_fraction(progress_texts)
+            group_id = state_payload.get("workflow_group_id", "")
+            registered = len(workflow_ids)
+            expected = int(state_payload.get("workflow_group_size", 0) or 0)
+            total_confs = int(state_payload.get("workflow_group_total_confs", 0) or 0)
+            phase_bits = [f"{phase} {count}" for phase, count in sorted(workflow_phases.items())]
+            scope_text = f"Workflows {registered}"
+            if expected:
+                scope_text += f"/{expected}"
+            phase_text = f"{scope_text}"
+            if group_id:
+                phase_text = f"Group {group_id} | {phase_text}"
+            phase_text += f" | Last updated: {updated_at}"
+            if phase_bits:
+                phase_text += " | " + ", ".join(phase_bits)
+            if grand_total:
+                phase_text += f" | Progress: {current_total}/{grand_total}"
 
-            counts = detail_cache.get("counts")
-            if isinstance(counts, dict):
-                total = counts.get("total", 0)
-                finished = counts.get("finished", 0)
-                running = counts.get("running", 0)
-                conf_total = counts.get("conf_total", 0)
-                conf_finished = counts.get("conf_finished", 0)
-                conf_running = counts.get("conf_running", 0)
-                conf_failed = counts.get("conf_failed", 0)
-                detail_updated_at = detail_cache.get("updated_at")
-                detail_suffix = ""
-                if detail_updated_at:
-                    detail_suffix = " | Details updated: " + datetime.fromtimestamp(detail_updated_at).strftime("%H:%M:%S")
+            stats_totals = {
+                "total": 0,
+                "running": 0,
+                "finished": 0,
+                "conf_total": 0,
+                "conf_running": 0,
+                "conf_finished": 0,
+                "conf_failed": 0,
+            }
+            detail_refreshing = 0
+            detail_errors: List[str] = []
+            detail_update_times: List[float] = []
+            for workflow_id in workflow_ids:
+                detail_cache = _get_workflow_detail_cache(workflow_id, config_path)
+                counts = detail_cache.get("counts")
+                if isinstance(counts, dict):
+                    for key in stats_totals:
+                        stats_totals[key] += int(counts.get(key, 0) or 0)
+                    updated_stamp = detail_cache.get("updated_at")
+                    if isinstance(updated_stamp, (int, float)):
+                        detail_update_times.append(float(updated_stamp))
+                elif detail_cache.get("error"):
+                    detail_errors.append(f"{workflow_id}: {detail_cache['error']}")
                 if detail_cache.get("running"):
-                    detail_suffix += " | Refreshing details..."
+                    detail_refreshing += 1
+
+            if stats_totals["total"] or stats_totals["conf_total"]:
                 stats = (
-                    f"Steps: Total {total} | Running {running} | Finished {finished}"
-                    f" | Confs: Total {conf_total} | Running {conf_running} | "
-                    f"Finished {conf_finished} | Failed {conf_failed}"
-                    f"{detail_suffix}"
+                    f"Steps: Total {stats_totals['total']} | Running {stats_totals['running']} | Finished {stats_totals['finished']}"
+                    f" | Confs: Total {stats_totals['conf_total']} | Running {stats_totals['conf_running']} | "
+                    f"Finished {stats_totals['conf_finished']} | Failed {stats_totals['conf_failed']}"
                 )
-            elif detail_cache.get("running"):
-                stats = "Steps/Confs: querying details in background..."
-            elif detail_cache.get("error"):
-                stats = f"Steps/Confs: detail query failed: {detail_cache['error']}"
+                if total_confs:
+                    stats += f" | Planned confs {total_confs}"
+                if detail_update_times:
+                    stats += " | Details updated: " + datetime.fromtimestamp(max(detail_update_times)).strftime("%H:%M:%S")
+                if detail_refreshing:
+                    stats += f" | Refreshing details for {detail_refreshing} workflow(s)..."
+            elif detail_errors:
+                stats = "Steps/Confs: detail query failed: " + "; ".join(detail_errors[:3])
+            elif detail_refreshing:
+                stats = f"Steps/Confs: querying details in background for {detail_refreshing} workflow(s)..."
             else:
                 stats = "Steps/Confs: detail query pending."
-            return percent, f"{percent}%", phase_text, stats, state_payload, workflow_id
+            stats += f"\nWorkflow IDs: {workflow_id_text}"
+            return percent, f"{percent}%", phase_text, stats, state_payload, workflow_id_text
 
         @self.app.callback(
             Output("retrieve-progress-bar", "value"),
@@ -3020,6 +3489,8 @@ class ApexGuiApp:
                 state_payload["workdir"] = _normalize_workdir(submit_workdir)
             if submit_workflow_id and not state_payload.get("workflow_id"):
                 state_payload["workflow_id"] = submit_workflow_id.strip()
+            if submit_workflow_id and not state_payload.get("workflow_ids"):
+                state_payload["workflow_ids"] = _parse_workflow_ids(submit_workflow_id)
             value, label, animated, text, next_state, feedback = _finalize_retrieve_status(state_payload)
             return value, label, animated, text, next_state, feedback
 
@@ -3073,6 +3544,7 @@ class ApexGuiApp:
                 "status": "running",
                 "workdir": payload.get("workdir") or state_payload.get("workdir") or os.getcwd(),
                 "workflow_id": payload.get("workflow_id") or state_payload.get("workflow_id") or "",
+                "workflow_ids": payload.get("workflow_ids") or state_payload.get("workflow_ids") or [],
                 "global_file": payload.get("global_file") or state_payload.get("global_file") or "global.json",
                 "log_file": payload.get("log_file", ""),
                 "status_file": payload.get("status_file", ""),

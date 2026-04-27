@@ -87,6 +87,12 @@ def parse_args():
         type=str, default=None,
         help="(Optional) Specify name of the workflow",
     )
+    parser_submit.add_argument(
+        "-l", "--label",
+        action="append",
+        default=None,
+        help="(Optional) Workflow label in key=value form; may be provided multiple times.",
+    )
 
     ##########################################
     # Do single step locally
@@ -924,7 +930,8 @@ def main():
             indicated_flow_type=args.flow,
             flow_name=args.name,
             submit_only=args.submit_only,
-            is_debug=args.debug
+            is_debug=args.debug,
+            labels=args.label,
         )
     elif args.cmd == "list":
             config_dflow(args.config)

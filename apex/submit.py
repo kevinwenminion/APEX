@@ -615,6 +615,7 @@ def submit_from_args(
         flow_name: str = None,
         submit_only=False,
         is_debug=False,
+        labels=None,
 ):
     print('-------Submit Workflow Mode-------')
     parameter_dicts = []
@@ -626,6 +627,19 @@ def submit_from_args(
             )
         parameter_dicts.append(param_dict)
 
+    label_mapping = None
+    if labels:
+        label_mapping = {}
+        for item in labels:
+            if "=" not in item:
+                raise RuntimeError(f"Invalid submit label {item!r}; expected key=value")
+            key, value = item.split("=", 1)
+            clean_key = key.strip()
+            clean_value = value.strip()
+            if not clean_key or not clean_value:
+                raise RuntimeError(f"Invalid submit label {item!r}; empty key/value is not allowed")
+            label_mapping[clean_key] = clean_value
+
     submit_workflow(
         parameter_dicts=parameter_dicts,
         config_dict=load_config_file(config_file),
@@ -634,5 +648,6 @@ def submit_from_args(
         flow_name=flow_name,
         submit_only=submit_only,
         is_debug=is_debug,
+        labels=label_mapping,
     )
     print('Completed!')
