@@ -400,8 +400,8 @@ apex gui [-H HOST] [-p PORT] [--no-browser]
 
 - Default URL: `http://127.0.0.1:8060/`
 - The GUI has four tabs:
-  - **Submit**: simplified generator for `param.json` + `global.json`, then launch background submit:
-    `nohup apex submit param.json -c global.json > apex.log 2>&1 &`
+  - **Submit**: simplified generator for `param.json` + `global.json`, then launch background submit
+    (internally driven by the GUI wrapper rather than a single raw `nohup apex submit ...` command)
     (supports fixed element slots plus an extra-element input for larger `interaction.type_map`)
     (the generated `param.json` is merged from profile-specific `param_structure.json` + `param_relax.json` + `param_props.json`,
     and property checkboxes follow the selected profile)
@@ -409,10 +409,22 @@ apex gui [-H HOST] [-p PORT] [--no-browser]
     and default `INCAR`/`INPUT` files are auto-created from template when needed)
     (interaction table now supports dynamic add/remove rows; ABACUS uses a third `orb_file` column)
     (VASP/ABACUS also provide an `INCAR`/`INPUT` text editor in GUI; its content is written to the target file on submit)
+    (when dflow can run at most 100 calculations per workflow, the GUI now auto-counts matched confs, splits them into batches of at most 100 confs,
+    submits those workflows in parallel, and stores batch metadata in `.apex-submit-group.json`)
+    (the `Workflow ID(s)` field accepts multiple workflow ids separated by commas; the GUI can aggregate progress across the whole batch)
+    (you can also prefill multiple workflow ids manually by following the example template `apex/default_config/gui_submit_group.template.json`)
   - **Manage**: tail and refresh `apex.log` for background submit status
   - **Advanced**: run custom command tails (except `gui`/`report`, which are blocked to avoid nested Dash servers)
   - **Account**: overwrite Bohrium account fields (`email`/`program_id`/`password`) backed by `apex account` storage;
     password is never displayed in GUI (only "set/unset" status)
+
+For manually tracking an existing workflow group in the GUI, fill the `Workflow ID(s)` field with comma-separated ids, for example:
+
+```text
+wf-aaaa1111, wf-bbbb2222, wf-cccc3333
+```
+
+The progress bar and the step/conf statistics panel will aggregate all listed workflows together. A reusable example payload is provided at [apex/default_config/gui_submit_group.template.json](/Users/yinziqi/Documents/Codex-Space/APEX/apex/default_config/gui_submit_group.template.json).
 
 ### 3.8 Bohrium Account Defaults
 

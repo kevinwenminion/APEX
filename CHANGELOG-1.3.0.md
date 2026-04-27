@@ -39,6 +39,21 @@ This release consolidates the 1.2.1 and 1.2.2 changes into a single changelog.
   - `Submit`: run background submit.
 - Added submit safety check:
   - if `apex.log` already exists, GUI asks for confirmation before resubmission.
+- Added batched GUI submit for dflow calculation limits:
+  - GUI now resolves the total matched conf count before submit.
+  - when more than 100 confs are matched, GUI splits them into multiple batch parameter files with at most 100 confs per workflow.
+  - those batch workflows are submitted in parallel from the GUI background wrapper.
+  - GUI writes `.apex-submit-group.json` to record batch metadata and discovered workflow ids.
+- Added multi-workflow progress tracking in GUI:
+  - `Workflow ID(s)` now accepts multiple ids separated by commas.
+  - submit progress aggregates workflow phase, remote progress, step counts, and conf counts across all listed workflows.
+  - `Retrieve + Report` can reuse the same multi-id field to retrieve several workflows from one GUI session.
+- Added GUI workflow grouping hints for easier identification:
+  - each batch workflow gets a grouped GUI name with batch suffix such as `...-batch-001`.
+  - each batch workflow is labeled with shared keys such as `apex_gui_group`, `apex_gui_workdir`, and `apex_gui_batch`.
+- Added a reusable GUI workflow-id template file:
+  - `apex/default_config/gui_submit_group.template.json`
+  - users can copy/fill this template and paste its `workflow_ids` into the GUI `Workflow ID(s)` field for manual progress queries.
 - Property checkbox behavior is now strict:
   - only checked properties are kept in generated `param.json`.
   - unchecked properties are not emitted.
