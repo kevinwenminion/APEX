@@ -395,6 +395,21 @@ def _is_retrieve_feedback(payload: Any) -> bool:
     return isinstance(payload, dict) and payload.get("operation") == "retrieve" and bool(payload.get("status_file"))
 
 
+def _retrieve_state_is_active(state_payload: Any) -> bool:
+    if not isinstance(state_payload, dict) or state_payload.get("status") != "running":
+        return False
+    status_file = state_payload.get("status_file") or ""
+    if not status_file:
+        return True
+    if not os.path.isfile(status_file):
+        return True
+    try:
+        with open(status_file, "r", encoding="utf-8") as f:
+            return not f.read().strip()
+    except OSError:
+        return True
+
+
 def _resolve_triggered_id():
     if hasattr(dash, "ctx") and dash.ctx.triggered_id is not None:
         return dash.ctx.triggered_id
@@ -621,6 +636,24 @@ def _parse_retrieve_progress_from_log(log_text: str) -> Optional[Tuple[int, str,
     else:
         text = f"{RETRIEVE_RUNNING_MESSAGE} 0/{total}"
     return percent, label, text
+
+
+def _retrieve_log_matches_workflow(log_file: str, workflow_id: str) -> bool:
+    workflow_id = (workflow_id or "").strip()
+    if not workflow_id:
+        return True
+    try:
+        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+            for _ in range(80):
+                line = f.readline()
+                if not line:
+                    break
+                match = re.search(r"Retrieving\s+\d+\s+workflow results\s+(\S+)\s+to\b", line)
+                if match:
+                    return match.group(1) == workflow_id
+    except OSError:
+        return False
+    return False
 
 
 def _parse_extra_elements(raw_text: str) -> List[str]:
@@ -1854,7 +1887,7 @@ def _finalize_retrieve_status(state_payload: Dict[str, Any]) -> Tuple[int, str, 
         log_file = os.path.join(_normalize_workdir(workdir or os.getcwd()), "apex-retrieve.log")
         if os.path.isfile(log_file):
             log_text = _read_log_tail(log_file, max_lines=200, workdir=None)
-            if not workflow_id or f"workflow results {workflow_id}" in log_text:
+            if _retrieve_log_matches_workflow(log_file, workflow_id):
                 progress = _parse_retrieve_progress_from_log(log_text)
                 if progress:
                     value, label, text = progress
@@ -2664,6 +2697,7 @@ class ApexGuiApp:
             State("submit-param-file", "value"),
             State("submit-workflow-id", "value"),
             State("submit-state", "data"),
+            State("retrieve-state", "data"),
             State("advanced-command", "value"),
             prevent_initial_call=True,
         )
@@ -2682,6 +2716,7 @@ class ApexGuiApp:
             submit_param_file,
             submit_workflow_id,
             submit_state,
+            retrieve_state,
             advanced_command,
         ):
             triggered_id = _resolve_triggered_id()
@@ -2770,6 +2805,17 @@ class ApexGuiApp:
                 if not workflow_id:
                     feedback = _build_feedback("Workflow ID is required for retrieve/report. Fill it or submit first.")
                     return feedback, False, default_confirm_message, state_payload, ""
+                if _retrieve_state_is_active(retrieve_state):
+                    active_workflow_id = ""
+                    if isinstance(retrieve_state, dict):
+                        active_workflow_id = retrieve_state.get("workflow_id", "") or workflow_id
+                    feedback = _build_feedback(
+                        f"Retrieve is already running for workflow {active_workflow_id}. "
+                        "Wait for it to finish before starting another Retrieve + Report.",
+                        ok=False,
+                    )
+                    state_payload["workflow_id"] = active_workflow_id or workflow_id
+                    return feedback, False, default_confirm_message, state_payload, active_workflow_id or workflow_id
 
                 final_feedback = _start_retrieve_in_background(
                     workdir=workdir,

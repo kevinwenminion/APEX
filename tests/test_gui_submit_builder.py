@@ -39,6 +39,7 @@ from apex.gui import (
     _read_latest_workflow_id,
     _render_account_summary,
     _finalize_retrieve_status,
+    _retrieve_state_is_active,
     _run_finalize_pipeline,
     _save_uploaded_files,
     _save_account_overwrite,
@@ -502,6 +503,22 @@ class TestGuiSubmitBuilder(unittest.TestCase):
             self.assertEqual(next_state["status"], "running")
             self.assertIs(feedback, gui_module.dash.no_update)
 
+    def test_retrieve_state_is_active_until_status_file_has_result(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            status_file = os.path.join(tmpdir, ".apex-retrieve.status")
+            state = {
+                "status": "running",
+                "status_file": status_file,
+            }
+
+            self.assertTrue(_retrieve_state_is_active(state))
+            with open(status_file, "w", encoding="utf-8") as f:
+                f.write("")
+            self.assertTrue(_retrieve_state_is_active(state))
+            with open(status_file, "w", encoding="utf-8") as f:
+                f.write("0")
+            self.assertFalse(_retrieve_state_is_active(state))
+
     def test_finalize_retrieve_status_auto_detects_log_progress(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = os.path.join(tmpdir, "apex-retrieve.log")
@@ -522,6 +539,50 @@ class TestGuiSubmitBuilder(unittest.TestCase):
             self.assertTrue(animated)
             self.assertIn("123/971", text)
             self.assertEqual(next_state, state)
+            self.assertIs(feedback, gui_module.dash.no_update)
+
+    def test_finalize_retrieve_status_auto_detects_long_log_progress(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "apex-retrieve.log")
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("Retrieving 971 workflow results guitest-joint-pzcq4 to /tmp/work\n")
+                for index in range(300):
+                    f.write(f"noise line {index}\n")
+                f.write("Retrieving result 123/971: propertycal-rss-hea-conf-084-eos-00\n")
+            state = {
+                "workdir": tmpdir,
+                "workflow_id": "guitest-joint-pzcq4",
+            }
+
+            value, label, animated, text, next_state, feedback = _finalize_retrieve_status(state)
+
+            self.assertEqual(value, 13)
+            self.assertEqual(label, "13%")
+            self.assertTrue(animated)
+            self.assertIn("123/971", text)
+            self.assertEqual(next_state, state)
+            self.assertIs(feedback, gui_module.dash.no_update)
+
+    def test_finalize_retrieve_status_ignores_mismatched_log_progress(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "apex-retrieve.log")
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "Retrieving 971 workflow results guitest-joint-pzcq4 to /tmp/work\n"
+                    "Retrieving result 123/971: propertycal-rss-hea-conf-084-eos-00\n"
+                )
+            state = {
+                "workdir": tmpdir,
+                "workflow_id": "guitest-joint-other",
+            }
+
+            value, label, animated, text, next_state, feedback = _finalize_retrieve_status(state)
+
+            self.assertEqual(value, 0)
+            self.assertEqual(label, "0%")
+            self.assertFalse(animated)
+            self.assertEqual(text, "Retrieve 未运行")
+            self.assertEqual(next_state, {})
             self.assertIs(feedback, gui_module.dash.no_update)
 
     def test_finalize_retrieve_status_starts_report_after_success(self):
