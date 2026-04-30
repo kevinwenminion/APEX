@@ -223,7 +223,7 @@ Example:
 
 21. `interval`
 - Type: `int`, default `100`
-- Meaning: Checkpoint interval (in MC steps) used to detect and cache local minima for multi-configuration output.
+- Meaning: Checkpoint interval (in MC steps) used to update the hash-table cache of the lowest-RMS unique configurations for multi-configuration output.
 
 22. `metadata`
 - Type: `bool`, default `true`

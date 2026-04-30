@@ -656,7 +656,6 @@ def generate_rss(
     last_improve_step = 0
     sampled_cache = []
     sampled_cache_index = {}
-    interval_checkpoints = []
     near_target_threshold = max(5.0 * tol, 1e-2)
 
     def _store_sample(species_snapshot, step_value, rmse_value):
@@ -690,10 +689,6 @@ def generate_rss(
         sampled_cache_index.clear()
         for index, cached_entry in enumerate(sampled_cache):
             sampled_cache_index[tuple(cached_entry["species"])] = index
-
-    def _register_local_minimum(left, middle, right):
-        if middle["rmse"] <= left["rmse"] and middle["rmse"] <= right["rmse"]:
-            _store_sample(middle["species"], middle["step"], middle["rmse"])
     progress_bar = None
     if show_progress:
         if tqdm is None:
@@ -755,20 +750,12 @@ def generate_rss(
         else:
             state_species[i], state_species[j] = state_species[j], state_species[i]
 
-        if current_gap_metrics["rmse"] <= near_target_threshold and step % interval == 0:
-            interval_checkpoints.append(
-                {
-                    "species": list(state_species),
-                    "step": step,
-                    "rmse": float(current_gap_metrics["rmse"]),
-                }
+        if step % interval == 0:
+            _store_sample(
+                state_species,
+                step,
+                float(current_gap_metrics["rmse"]),
             )
-            if len(interval_checkpoints) >= 3:
-                _register_local_minimum(
-                    interval_checkpoints[-3],
-                    interval_checkpoints[-2],
-                    interval_checkpoints[-1],
-                )
 
         if progress_bar is not None:
             progress_bar.update(1)
@@ -785,19 +772,6 @@ def generate_rss(
 
     if progress_bar is not None:
         progress_bar.close()
-
-    if len(interval_checkpoints) == 1:
-        checkpoint = interval_checkpoints[0]
-        _store_sample(checkpoint["species"], checkpoint["step"], checkpoint["rmse"])
-    elif len(interval_checkpoints) >= 2:
-        terminal_left = interval_checkpoints[-2]
-        terminal_right = interval_checkpoints[-1]
-        if terminal_right["rmse"] <= terminal_left["rmse"]:
-            _store_sample(
-                terminal_right["species"],
-                terminal_right["step"],
-                terminal_right["rmse"],
-            )
 
     if num_configs == 1:
         decorated = _reconstruct_structure(parent, best_species)

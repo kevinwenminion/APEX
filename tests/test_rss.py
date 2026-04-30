@@ -244,7 +244,7 @@ class TestRSS(unittest.TestCase):
         self.assertEqual(meta["sampling"]["interval"], 20)
         self.assertEqual(len(meta["sampling"]["sampled_rmses"]), 3)
 
-    def test_num_configs_cache_keeps_best_local_minima_by_rmse(self):
+    def test_num_configs_cache_keeps_best_unique_configs_by_rmse(self):
         st = fcc("Ni", a=3.6)
         st.make_supercell([2, 2, 1])
         swap_sequence = [(0, 1), (1, 2), (2, 3), (0, 3), (0, 2), (1, 3)]
@@ -258,24 +258,71 @@ class TestRSS(unittest.TestCase):
             {"rmse": 0.10, "max_abs": 0.10},
         ]
 
-        with patch("apex.core.lib.rss._pick_swap", side_effect=swap_sequence):
-            with patch("apex.core.lib.rss._compute_warren_cowley_sro", return_value={}):
-                with patch("apex.core.lib.rss._objective_function", return_value=0.0):
-                    with patch("apex.core.lib.rss._sro_gap_metrics", side_effect=rmse_sequence):
-                        outputs, meta = generate_rss(
-                            structure=st,
-                            compositions={"all": {"Co": 0.5, "Ni": 0.5}},
-                            shell_cutoffs=[2.8],
-                            max_steps=len(swap_sequence),
-                            interval=1,
-                            num_configs=2,
-                            tol=0.05,
-                            return_metadata=True,
-                        )
+        def deterministic_assign(state_species, indices, counts, rng):
+            expanded = []
+            for species, count in sorted(counts.items()):
+                expanded.extend([species] * count)
+            for site_index, species in zip(indices, expanded):
+                state_species[site_index] = species
+
+        with patch("apex.core.lib.rss._assign_initial_species", side_effect=deterministic_assign):
+            with patch("apex.core.lib.rss._pick_swap", side_effect=swap_sequence):
+                with patch("apex.core.lib.rss._compute_warren_cowley_sro", return_value={}):
+                    with patch("apex.core.lib.rss._objective_function", return_value=0.0):
+                        with patch("apex.core.lib.rss._sro_gap_metrics", side_effect=rmse_sequence):
+                            outputs, meta = generate_rss(
+                                structure=st,
+                                compositions={"all": {"Co": 0.5, "Ni": 0.5}},
+                                shell_cutoffs=[2.8],
+                                max_steps=len(swap_sequence),
+                                interval=1,
+                                num_configs=2,
+                                tol=0.05,
+                                return_metadata=True,
+                            )
 
         self.assertEqual(len(outputs), 2)
         self.assertEqual(meta["sampling"]["sampled_steps"], [6, 4])
         self.assertEqual(meta["sampling"]["sampled_rmses"], [0.10, 0.15])
+
+    def test_num_configs_cache_updates_duplicate_config_with_lower_rmse(self):
+        st = fcc("Ni", a=3.6)
+        st.make_supercell([2, 2, 1])
+        swap_sequence = [(0, 1), (0, 1), (2, 3), (2, 3)]
+        rmse_sequence = [
+            {"rmse": 0.50, "max_abs": 0.50},
+            {"rmse": 0.40, "max_abs": 0.40},
+            {"rmse": 0.30, "max_abs": 0.30},
+            {"rmse": 0.20, "max_abs": 0.20},
+            {"rmse": 0.10, "max_abs": 0.10},
+        ]
+
+        def deterministic_assign(state_species, indices, counts, rng):
+            expanded = []
+            for species, count in sorted(counts.items()):
+                expanded.extend([species] * count)
+            for site_index, species in zip(indices, expanded):
+                state_species[site_index] = species
+
+        with patch("apex.core.lib.rss._assign_initial_species", side_effect=deterministic_assign):
+            with patch("apex.core.lib.rss._pick_swap", side_effect=swap_sequence):
+                with patch("apex.core.lib.rss._compute_warren_cowley_sro", return_value={}):
+                    with patch("apex.core.lib.rss._objective_function", return_value=0.0):
+                        with patch("apex.core.lib.rss._sro_gap_metrics", side_effect=rmse_sequence):
+                            outputs, meta = generate_rss(
+                                structure=st,
+                                compositions={"all": {"Co": 0.5, "Ni": 0.5}},
+                                shell_cutoffs=[2.8],
+                                max_steps=len(swap_sequence),
+                                interval=1,
+                                num_configs=2,
+                                tol=0.05,
+                                return_metadata=True,
+        )
+
+        self.assertEqual(len(outputs), 2)
+        self.assertEqual(meta["sampling"]["sampled_steps"], [4, -1])
+        self.assertEqual(meta["sampling"]["sampled_rmses"], [0.10, 0.50])
 
     def test_invalid_structure_type_raises(self):
         with self.assertRaises(RSSInputError):
