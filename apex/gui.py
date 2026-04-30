@@ -510,22 +510,16 @@ def _start_retrieve_in_background(workdir: str, workflow_id: str, global_file: s
             "stderr": "",
             "finished_at": datetime.now().isoformat(timespec="seconds"),
         }
-    wrapper_code = (
-        "import subprocess, sys\n"
-        "workdir, global_file, log_file, status_file = sys.argv[1:5]\n"
-        "workflow_ids = sys.argv[5:]\n"
-        "codes = []\n"
-        "with open(log_file, 'a', encoding='utf-8') as log_fp:\n"
-        "    for idx, workflow_id in enumerate(workflow_ids, start=1):\n"
-        "        log_fp.write(f'[apex-gui] retrieve workflow {idx}/{len(workflow_ids)}: {workflow_id}\\n')\n"
-        "        log_fp.flush()\n"
-        "        args = [sys.executable, '-m', 'apex', 'retrieve', '-i', workflow_id, '-w', workdir, '-c', global_file]\n"
-        "        codes.append(subprocess.call(args, stdout=log_fp, stderr=subprocess.STDOUT, cwd=workdir, text=True))\n"
-        "final_code = 0 if all(code == 0 for code in codes) else 1\n"
-        "with open(status_file, 'w', encoding='utf-8') as fp:\n"
-        "    fp.write(str(final_code))\n"
-    )
-    command = [sys.executable, "-c", wrapper_code, workdir, global_file, log_file, status_file] + workflow_ids
+    command = [
+        sys.executable,
+        "-m",
+        "apex.gui_background",
+        "retrieve",
+        workdir,
+        global_file,
+        log_file,
+        status_file,
+    ] + workflow_ids
     display_cmd = " ".join(shlex.quote(token) for token in command)
     shell_cmd = (
         f"rm -f {shlex.quote(status_file)}; "
@@ -598,6 +592,9 @@ def _format_feedback(payload: Dict[str, Any]) -> str:
     message = payload.get("message")
     if message:
         lines.append(message)
+    report_url = str(payload.get("report_url") or "").strip()
+    if report_url:
+        lines.append(f"Report URL: {report_url}")
     command = payload.get("command")
     if command:
         lines.extend(["", f"$ {command}"])
@@ -615,6 +612,41 @@ def _format_feedback(payload: Dict[str, Any]) -> str:
         lines.extend(["", "(No command output)"])
 
     return "\n".join(lines)
+
+
+def _report_started_children(report_url: str) -> List[Any]:
+    clean_url = str(report_url or "").strip()
+    if not clean_url:
+        return ["Retrieve finished; report started."]
+    return [
+        "Retrieve finished; report started. ",
+        html.A(clean_url, href=clean_url, target="_blank", rel="noreferrer"),
+    ]
+
+
+def _completed_retrieve_state(
+    workdir: str,
+    workflow_id: str,
+    workflow_ids: Optional[List[str]],
+    global_file: str,
+    param_file: str,
+    text: Any,
+    log_file: str = "",
+    status_file: str = "",
+    report_url: str = "",
+) -> Dict[str, Any]:
+    return {
+        "status": "done",
+        "workdir": workdir,
+        "workflow_id": workflow_id,
+        "workflow_ids": workflow_ids or _parse_workflow_ids(workflow_id),
+        "global_file": global_file,
+        "param_file": param_file,
+        "log_file": log_file,
+        "status_file": status_file,
+        "completed_text": text,
+        "report_url": report_url,
+    }
 
 
 def _read_log_tail(log_path: str = "apex.log", max_lines: int = 400, workdir: Optional[str] = None) -> str:
@@ -1366,6 +1398,7 @@ def _workflow_log_records(workdir: str) -> List[Dict[str, str]]:
                         "operation": parts[1].strip(),
                         "timestamp": parts[2].strip(),
                         "workdir": parts[3].strip(),
+                        "workflow_uid": parts[4].strip() if len(parts) > 4 else "",
                     }
                 )
     except OSError:
@@ -1893,44 +1926,11 @@ def _get_workflow_detail_cache(workflow_id: str, config_file: str, now: Optional
     return entry
 
 
-def _submit_wrapper_code() -> str:
-    return (
-        "import json, os, subprocess, sys\n"
-        "meta_path, log_file, status_file = sys.argv[1:4]\n"
-        "with open(meta_path, 'r', encoding='utf-8') as fp:\n"
-        "    meta = json.load(fp)\n"
-        "jobs = meta.get('submit_jobs', [])\n"
-        "os.makedirs(os.path.dirname(log_file) or '.', exist_ok=True)\n"
-        "exit_codes = []\n"
-        "with open(log_file, 'a', encoding='utf-8') as log_fp:\n"
-        "    log_fp.write(f\"[apex-gui] submit group {meta.get('group_id', '')} start\\n\")\n"
-        "    log_fp.flush()\n"
-        "    procs = []\n"
-        "    for job in jobs:\n"
-        "        args = [sys.executable, '-m', 'apex', 'submit', job['param_file'], '-c', job['global_file'], '-s', '-n', job['workflow_name']]\n"
-        "        for label in job.get('labels', []):\n"
-        "            args.extend(['-l', label])\n"
-        "        log_fp.write(f\"[apex-gui] launch batch {job.get('batch_index')}/{job.get('batch_total')}: {' '.join(args)}\\n\")\n"
-        "        log_fp.flush()\n"
-        "        procs.append((job, subprocess.Popen(args, stdout=log_fp, stderr=subprocess.STDOUT, cwd=job['workdir'], text=True)))\n"
-        "    for job, proc in procs:\n"
-        "        code = proc.wait()\n"
-        "        exit_codes.append(code)\n"
-        "        log_fp.write(f\"[apex-gui] batch {job.get('batch_index')}/{job.get('batch_total')} exited with code {code}\\n\")\n"
-        "        log_fp.flush()\n"
-        "    final_code = 0 if all(code == 0 for code in exit_codes) else 1\n"
-        "    log_fp.write(f\"[apex-gui] submit group done with code {final_code}\\n\")\n"
-        "    log_fp.flush()\n"
-        "with open(status_file, 'w', encoding='utf-8') as fp:\n"
-        "    fp.write(str(0 if not exit_codes else (0 if all(code == 0 for code in exit_codes) else 1)))\n"
-    )
-
-
 def _build_submit_shell_command(meta_path: str, cwd: str) -> Tuple[str, str]:
     log_file = os.path.join(cwd, "apex.log")
     status_file = os.path.join(cwd, SUBMIT_STATUS_FILE)
     submit_inner = (
-        f"{shlex.quote(sys.executable)} -c {shlex.quote(_submit_wrapper_code())} "
+        f"{shlex.quote(sys.executable)} -m apex.gui_background submit-group "
         f"{shlex.quote(meta_path)} {shlex.quote(log_file)} {shlex.quote(status_file)}"
     )
     display_cmd = f"nohup {submit_inner} > /dev/null 2>&1 &"
@@ -2158,6 +2158,7 @@ def _run_report_in_background(
     if pid:
         message += f" PID: {pid}."
     message += " Log file: apex-report.log"
+    report_url = f"http://{DEFAULT_HOST}:{port}"
     return {
         "ok": completed.returncode == 0,
         "message": message if completed.returncode == 0 else "Background report failed to start.",
@@ -2166,7 +2167,50 @@ def _run_report_in_background(
         "stdout": completed.stdout.strip(),
         "stderr": completed.stderr.strip(),
         "finished_at": datetime.now().isoformat(timespec="seconds"),
+        "report_url": report_url,
     }
+
+
+def _ensure_local_all_result(workdir: str, global_file: str, param_file: str) -> Tuple[bool, str]:
+    target_workdir = _normalize_workdir(workdir)
+    all_result_path = os.path.join(target_workdir, "all_result.json")
+    if os.path.isfile(all_result_path):
+        return True, all_result_path
+
+    resolved_global = _resolve_file_path(target_workdir, global_file or "global.json")
+    resolved_param = _resolve_file_path(target_workdir, param_file or "param.json")
+    if not resolved_param or not os.path.isfile(resolved_param):
+        return False, f"param file not found: {resolved_param or param_file or 'param.json'}"
+    if not resolved_global or not os.path.isfile(resolved_global):
+        return False, f"global file not found: {resolved_global or global_file or 'global.json'}"
+
+    try:
+        from apex.archive import archive_workdir
+        from apex.config import Config
+        from apex.utils import judge_flow, load_config_file
+        from monty.serialization import loadfn
+    except Exception as exc:
+        return False, f"failed to load local archive helpers: {exc}"
+
+    try:
+        param_dict = loadfn(resolved_param)
+        config_dict = load_config_file(resolved_global)
+        cfg = Config(**config_dict)
+        cfg.database_type = "local"
+        _run_op, _calculator, flow_type, relax_param, props_param = judge_flow([param_dict], None)
+        archive_workdir(
+            relax_param=relax_param,
+            props_param=props_param,
+            config=cfg,
+            work_dir=target_workdir,
+            flow_type=flow_type,
+        )
+    except Exception as exc:
+        return False, str(exc)
+
+    if not os.path.isfile(all_result_path):
+        return False, "archive_workdir completed but all_result.json is still missing"
+    return True, all_result_path
 
 
 def _run_finalize_pipeline(workdir: str, workflow_id: str, global_file: str) -> Dict[str, Any]:
@@ -2180,7 +2224,10 @@ def _run_finalize_pipeline(workdir: str, workflow_id: str, global_file: str) -> 
 
     all_result_path = os.path.join(workdir, "all_result.json")
     if not os.path.isfile(all_result_path):
-        return _build_feedback("Retrieve finished but all_result.json was not generated.")
+        ok, payload = _ensure_local_all_result(workdir, global_file, "param.json")
+        if not ok:
+            return _build_feedback(f"Retrieve finished but all_result.json was not generated: {payload}")
+        all_result_path = payload
 
     report_feedback = _run_report_in_background(global_file, workdir, cwd=workdir)
     if not report_feedback.get("ok"):
@@ -2194,11 +2241,20 @@ def _run_finalize_pipeline(workdir: str, workflow_id: str, global_file: str) -> 
     return report_feedback
 
 
-def _finalize_retrieve_status(state_payload: Dict[str, Any]) -> Tuple[int, str, bool, str, Dict[str, Any], Dict[str, Any]]:
+def _finalize_retrieve_status(state_payload: Dict[str, Any]) -> Tuple[int, str, bool, Any, Dict[str, Any], Dict[str, Any]]:
     retrieve_state = None
     if isinstance(state_payload, dict):
         if state_payload.get("status") == "running":
             retrieve_state = state_payload
+        elif state_payload.get("status") == "done":
+            return (
+                100,
+                "100%",
+                False,
+                state_payload.get("completed_text") or "Retrieve finished.",
+                state_payload,
+                dash.no_update,
+            )
         else:
             retrieve_state = state_payload.get("retrieve")
     if not isinstance(retrieve_state, dict) or retrieve_state.get("status") != "running":
@@ -2218,6 +2274,7 @@ def _finalize_retrieve_status(state_payload: Dict[str, Any]) -> Tuple[int, str, 
     log_file = retrieve_state.get("log_file") or ""
     workdir = retrieve_state.get("workdir") or state_payload.get("workdir") or os.getcwd()
     global_file = retrieve_state.get("global_file") or state_payload.get("global_file") or "global.json"
+    param_file = retrieve_state.get("param_file") or state_payload.get("param_file") or "param.json"
     if not status_file or not os.path.isfile(status_file):
         log_text = _read_log_tail(log_file, max_lines=200, workdir=None) if log_file else ""
         progress = _parse_retrieve_progress_from_log(log_text)
@@ -2243,22 +2300,57 @@ def _finalize_retrieve_status(state_payload: Dict[str, Any]) -> Tuple[int, str, 
 
     all_result_path = os.path.join(workdir, "all_result.json")
     if not os.path.isfile(all_result_path):
-        feedback = _build_feedback("Retrieve finished but all_result.json was not generated.")
-        feedback["command"] = retrieve_state.get("command", "")
-        feedback["returncode"] = return_code
-        feedback["stdout"] = _read_log_tail(log_file, max_lines=80, workdir=None) if log_file else ""
-        return 100, "Done", False, "Retrieve finished; all_result.json missing.", {}, feedback
+        ok, payload = _ensure_local_all_result(workdir, global_file, param_file)
+        if not ok:
+            feedback = _build_feedback(f"Retrieve finished but all_result.json was not generated: {payload}")
+            feedback["command"] = retrieve_state.get("command", "")
+            feedback["returncode"] = return_code
+            feedback["stdout"] = _read_log_tail(log_file, max_lines=80, workdir=None) if log_file else ""
+            completed_state = _completed_retrieve_state(
+                workdir=workdir,
+                workflow_id=retrieve_state.get("workflow_id", ""),
+                workflow_ids=retrieve_state.get("workflow_ids", []),
+                global_file=global_file,
+                param_file=param_file,
+                text="Retrieve finished; all_result.json missing.",
+                log_file=log_file,
+                status_file=status_file,
+            )
+            return 100, "Done", False, "Retrieve finished; all_result.json missing.", completed_state, feedback
+        all_result_path = payload
 
     report_feedback = _run_report_in_background(global_file, workdir, cwd=workdir)
     if not report_feedback.get("ok"):
         report_feedback["message"] = f"Report failed. {report_feedback.get('message', '')}".strip()
-        return 100, "Done", False, "Retrieve finished; report failed.", {}, report_feedback
+        completed_state = _completed_retrieve_state(
+            workdir=workdir,
+            workflow_id=retrieve_state.get("workflow_id", ""),
+            workflow_ids=retrieve_state.get("workflow_ids", []),
+            global_file=global_file,
+            param_file=param_file,
+            text="Retrieve finished; report failed.",
+            log_file=log_file,
+            status_file=status_file,
+        )
+        return 100, "Done", False, "Retrieve finished; report failed.", completed_state, report_feedback
 
     report_feedback["message"] = (
         f"Retrieve + report completed. all_result.json: {all_result_path}. "
         f"{report_feedback.get('message', '')}"
     )
-    return 100, "100%", False, "Retrieve finished; report started.", {}, report_feedback
+    completed_text = _report_started_children(report_feedback.get("report_url", ""))
+    completed_state = _completed_retrieve_state(
+        workdir=workdir,
+        workflow_id=retrieve_state.get("workflow_id", ""),
+        workflow_ids=retrieve_state.get("workflow_ids", []),
+        global_file=global_file,
+        param_file=param_file,
+        text=completed_text,
+        log_file=log_file,
+        status_file=status_file,
+        report_url=report_feedback.get("report_url", ""),
+    )
+    return 100, "100%", False, completed_text, completed_state, report_feedback
 
 
 DEFAULT_GLOBAL_EDITOR_TEXT = _json_dump_text(_load_profile_global(DEFAULT_PROFILE))
@@ -3230,6 +3322,7 @@ class ApexGuiApp:
                     workflow_id=workflow_id_text,
                     global_file=global_file,
                 )
+                final_feedback["param_file"] = param_file
                 state_payload["workflow_id"] = workflow_id_text
                 state_payload["workflow_ids"] = workflow_ids
                 return final_feedback, False, default_confirm_message, state_payload, workflow_id_text
@@ -3546,6 +3639,7 @@ class ApexGuiApp:
                 "workflow_id": payload.get("workflow_id") or state_payload.get("workflow_id") or "",
                 "workflow_ids": payload.get("workflow_ids") or state_payload.get("workflow_ids") or [],
                 "global_file": payload.get("global_file") or state_payload.get("global_file") or "global.json",
+                "param_file": payload.get("param_file") or state_payload.get("param_file") or "param.json",
                 "log_file": payload.get("log_file", ""),
                 "status_file": payload.get("status_file", ""),
                 "command": payload.get("command", ""),

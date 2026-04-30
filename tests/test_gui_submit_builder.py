@@ -195,12 +195,17 @@ class TestGuiSubmitBuilder(unittest.TestCase):
             self.assertIn("models/Ni.eam.alloy", values)
             self.assertEqual(values[0], "missing.pb")
 
-    def test_gui_submit_command_uses_submit_only(self):
-        shell_cmd, display_cmd = _build_submit_shell_command("param.json", "global.json")
+    def test_gui_submit_command_uses_background_runner_module(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            meta_path = os.path.join(tmpdir, ".apex-submit-group.json")
+            shell_cmd, display_cmd = _build_submit_shell_command(meta_path, tmpdir)
 
-        self.assertIn(" submit ", shell_cmd)
-        self.assertIn(" -s", shell_cmd)
-        self.assertIn(" -s", display_cmd)
+        self.assertIn("apex.gui_background submit-group", shell_cmd)
+        self.assertIn("apex.gui_background submit-group", display_cmd)
+        self.assertIn(".apex-submit-group.json", shell_cmd)
+        self.assertIn(".apex-submit.status", shell_cmd)
+        self.assertNotIn("python -c", shell_cmd)
+        self.assertNotIn("python -c", display_cmd)
 
     def test_list_structure_path_options_returns_structure_dirs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -430,7 +435,7 @@ class TestGuiSubmitBuilder(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             with open(os.path.join(tmpdir, ".workflow.log"), "w", encoding="utf-8") as f:
                 f.write("wf-old\tsubmit\t2026-01-01T00:00:00\t/tmp/old\n")
-                f.write("wf-new\tretrieve\t2026-01-01T00:00:01\t/tmp/new\n")
+                f.write("wf-new\tretrieve\t2026-01-01T00:00:01\t/tmp/new\twf-uid-new\n")
             self.assertEqual(_read_latest_workflow_id(tmpdir), "wf-new")
 
     def test_advanced_report_is_allowed_and_gets_separate_port(self):
@@ -611,8 +616,10 @@ class TestGuiSubmitBuilder(unittest.TestCase):
             self.assertEqual(value, 100)
             self.assertEqual(label, "100%")
             self.assertFalse(animated)
-            self.assertEqual(text, "Retrieve finished; report started.")
-            self.assertEqual(next_state, {})
+            self.assertEqual(text, ["Retrieve finished; report started."])
+            self.assertEqual(next_state.get("status"), "done")
+            self.assertEqual(next_state.get("workdir"), tmpdir)
+            self.assertEqual(next_state.get("completed_text"), ["Retrieve finished; report started."])
             self.assertIn("Retrieve + report completed", feedback["message"])
 
     def test_submit_status_file_is_not_treated_as_retrieve_feedback(self):

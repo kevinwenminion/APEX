@@ -23,6 +23,30 @@ class FakeWorkflow:
         raise FakeNotFoundError()
 
 
+class FakeWorkflowInfo:
+    id = "wf-name"
+    uid = "wf-uid"
+
+    class Status:
+        phase = "Succeeded"
+        progress = "1/1"
+        startedAt = "2026-01-01T00:00:00Z"
+        finishedAt = "2026-01-01T00:10:00Z"
+
+    class Metadata:
+        creationTimestamp = "2026-01-01T00:00:00Z"
+
+    status = Status()
+    metadata = Metadata()
+
+    def get_duration(self):
+        import datetime
+        return datetime.timedelta(seconds=600)
+
+    def get_step(self, *args, **kwargs):
+        return []
+
+
 class FakeStepInfo:
     def get_step(self, parent_id=None, sort_by_generation=False, key=None):
         return []
@@ -67,6 +91,86 @@ class WorkflowQueryErrorTest(unittest.TestCase):
             "Workflow 'guipro-joint-svgzz' was not found",
             str(context.exception),
         )
+
+    def test_resolve_workflow_reference_reads_uid_from_latest_record(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, ".workflow.log"), "w", encoding="utf-8") as fp:
+                fp.write("wf-old\tsubmit\t2026-01-01T00:00:00\t/tmp/old\n")
+                fp.write("wf-new\tsubmit\t2026-01-01T00:00:01\t/tmp/new\twf-uid-new\n")
+
+            workflow_id, workflow_uid = apex_main._resolve_workflow_reference(tmpdir)
+
+        self.assertEqual(workflow_id, "wf-new")
+        self.assertEqual(workflow_uid, "wf-uid-new")
+
+    def test_resolve_workflow_reference_matches_explicit_name_to_uid(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, ".workflow.log"), "w", encoding="utf-8") as fp:
+                fp.write("wf-name\tsubmit\t2026-01-01T00:00:01\t/tmp/work\twf-uid\n")
+
+            workflow_id, workflow_uid = apex_main._resolve_workflow_reference(
+                tmpdir,
+                workflow_id="wf-name",
+            )
+
+        self.assertEqual(workflow_id, "wf-name")
+        self.assertEqual(workflow_uid, "wf-uid")
+
+    def test_run_with_workflow_fallback_retries_by_uid_after_name_404(self):
+        workflow_calls = []
+
+        class FallbackWorkflow:
+            def __init__(self, id=None, uid=None):
+                self.id = id
+                self.uid = uid
+
+            def query(self):
+                workflow_calls.append((self.id, self.uid))
+                if self.uid == "wf-uid":
+                    return FakeWorkflowInfo()
+                raise FakeNotFoundError()
+
+        with mock.patch("apex.main.Workflow", FallbackWorkflow):
+            info = apex_main._run_with_workflow_fallback(
+                "wf-name",
+                "wf-uid",
+                lambda wf, _wf_ref, _used_uid: wf.query(),
+            )
+
+        self.assertEqual(info.uid, "wf-uid")
+        self.assertEqual(workflow_calls, [("wf-name", None), (None, "wf-uid")])
+
+    def test_resolve_cli_workflow_reference_treats_explicit_uuid_as_uid(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workflow_id, workflow_uid = apex_main._resolve_cli_workflow_reference(
+                tmpdir,
+                workflow_id="cd8239f4-100f-4048-8284-bf53b7e39450",
+            )
+
+        self.assertEqual(workflow_id, "")
+        self.assertEqual(workflow_uid, "cd8239f4-100f-4048-8284-bf53b7e39450")
+
+    def test_run_with_workflow_fallback_supports_uid_only_lookup(self):
+        workflow_calls = []
+
+        class UidOnlyWorkflow:
+            def __init__(self, id=None, uid=None):
+                self.id = id
+                self.uid = uid
+
+            def query(self):
+                workflow_calls.append((self.id, self.uid))
+                return FakeWorkflowInfo()
+
+        with mock.patch("apex.main.Workflow", UidOnlyWorkflow):
+            info = apex_main._run_with_workflow_fallback(
+                "",
+                "cd8239f4-100f-4048-8284-bf53b7e39450",
+                lambda wf, _wf_ref, _used_uid: wf.query(),
+            )
+
+        self.assertEqual(info.uid, "wf-uid")
+        self.assertEqual(workflow_calls, [(None, "cd8239f4-100f-4048-8284-bf53b7e39450")])
 
     def test_download_artifact_does_not_retry_missing_storage_artifact(self):
         with mock.patch(

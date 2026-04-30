@@ -1,4 +1,5 @@
 import argparse
+import re
 import logging
 import os
 import datetime
@@ -655,25 +656,97 @@ def format_time_delta(td: datetime.timedelta) -> str:
         return "%ds" % td.seconds
 
 
-def get_id_from_record(work_dir: os.PathLike, operation_name: str = None) -> str:
-    logging.info(msg='No workflow_id is provided, will employ the latest workflow')
+def _parse_workflow_log_record(line: str) -> dict | None:
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) < 4:
+        return None
+    return {
+        "workflow_id": parts[0].strip(),
+        "operation": parts[1].strip(),
+        "timestamp": parts[2].strip(),
+        "workdir": parts[3].strip(),
+        "workflow_uid": parts[4].strip() if len(parts) > 4 else "",
+    }
+
+
+def _format_workflow_log_record(record: dict) -> str:
+    return "\t".join(
+        [
+            str(record.get("workflow_id", "")).strip(),
+            str(record.get("operation", "")).strip(),
+            str(record.get("timestamp", "")).strip(),
+            str(record.get("workdir", "")).strip(),
+            str(record.get("workflow_uid", "")).strip(),
+        ]
+    ).rstrip("\t") + "\n"
+
+
+def _looks_like_workflow_uid(value: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+            str(value or "").strip(),
+        )
+    )
+
+
+def _load_workflow_log_records(work_dir: os.PathLike) -> list[dict]:
     workflow_log = os.path.join(work_dir, '.workflow.log')
     assert os.path.isfile(workflow_log), \
         'No workflow_id is provided and no .workflow.log file found in work_dir'
-    with open(workflow_log, 'r') as f:
-        try:
-            last_record = f.readlines()[-1]
-        except IndexError:
-            raise RuntimeError('No workflow_id is provided and .workflow.log file is empty!')
-    workflow_id = last_record.split('\t')[0]
-    assert workflow_id, 'No workflow ID for operation!'
-    logging.info(msg=f'Operating on workflow ID: {workflow_id}')
+    with open(workflow_log, 'r', encoding='utf-8', errors='replace') as f:
+        records = [_parse_workflow_log_record(line) for line in f if line.strip()]
+    records = [record for record in records if record]
+    if not records:
+        raise RuntimeError('No workflow_id is provided and .workflow.log file is empty!')
+    return records
+
+
+def _resolve_workflow_reference(
+        work_dir: os.PathLike,
+        workflow_id: str | None = None,
+        operation_name: str | None = None,
+) -> tuple[str, str]:
+    records = _load_workflow_log_records(work_dir)
+    selected_record = None
+    clean_workflow_id = str(workflow_id or "").strip()
+    if clean_workflow_id:
+        for record in reversed(records):
+            if clean_workflow_id in {
+                record.get("workflow_id", ""),
+                record.get("workflow_uid", ""),
+            }:
+                selected_record = record
+                break
+        if selected_record is None:
+            if _looks_like_workflow_uid(clean_workflow_id):
+                return "", clean_workflow_id
+            return clean_workflow_id, ""
+    else:
+        logging.info(msg='No workflow_id is provided, will employ the latest workflow')
+        selected_record = records[-1]
+
+    resolved_id = selected_record.get("workflow_id", "").strip()
+    resolved_uid = selected_record.get("workflow_uid", "").strip()
+    assert resolved_id, 'No workflow ID for operation!'
+    logging.info(
+        msg=(
+            f'Operating on workflow ID: {resolved_id}'
+            + (f' (UID: {resolved_uid})' if resolved_uid else '')
+        )
+    )
     if operation_name:
-        modified_record = last_record.split('\t')
-        modified_record[1] = operation_name
-        modified_record[2] = datetime.datetime.now().isoformat()
-        with open(workflow_log, 'a') as f:
-            f.write('\t'.join(modified_record))
+        updated_record = dict(selected_record)
+        updated_record["operation"] = operation_name
+        updated_record["timestamp"] = datetime.datetime.now().isoformat()
+        workflow_log = os.path.join(work_dir, '.workflow.log')
+        with open(workflow_log, 'a', encoding='utf-8') as f:
+            f.write(_format_workflow_log_record(updated_record))
+    return resolved_id, resolved_uid
+
+
+def get_id_from_record(work_dir: os.PathLike, operation_name: str = None) -> str:
+    workflow_id, _ = _resolve_workflow_reference(work_dir, operation_name=operation_name)
     return workflow_id
 
 
@@ -702,6 +775,66 @@ def _format_workflow_query_error(wf_id: str, exc: Exception) -> str | None:
         "If the ID is correct, verify the -c config file uses the same Bohrium/"
         "dflow account and project that submitted the workflow."
     )
+
+
+def _workflow_query_not_found_message(wf_ref: str, exc: Exception) -> str | None:
+    return _format_workflow_query_error(wf_ref, exc)
+
+
+def _build_workflow_handle(workflow_id: str, workflow_uid: str = "", prefer_uid: bool = False) -> Workflow:
+    clean_uid = str(workflow_uid or "").strip()
+    clean_id = str(workflow_id or "").strip()
+    if (prefer_uid or not clean_id) and clean_uid:
+        return Workflow(uid=clean_uid)
+    return Workflow(id=clean_id)
+
+
+def _run_with_workflow_fallback(
+        workflow_id: str,
+        workflow_uid: str,
+        action,
+):
+    clean_id = str(workflow_id or "").strip()
+    clean_uid = str(workflow_uid or "").strip()
+
+    if not clean_id and clean_uid:
+        wf_uid = _build_workflow_handle(clean_id, clean_uid, prefer_uid=True)
+        try:
+            return action(wf_uid, clean_uid, True)
+        except Exception as exc:
+            message = _workflow_query_not_found_message(clean_uid, exc)
+            if message:
+                raise SystemExit(message) from None
+            raise
+
+    wf = _build_workflow_handle(clean_id, clean_uid, prefer_uid=False)
+    try:
+        return action(wf, clean_id, False)
+    except Exception as exc:
+        if not clean_uid:
+            message = _workflow_query_not_found_message(clean_id, exc)
+            if message:
+                raise SystemExit(message) from None
+            raise
+        if _workflow_query_not_found_message(clean_id, exc) is None:
+            raise
+        logging.warning(
+            "Workflow %r was not found by name; retrying by UID %s.",
+            clean_id,
+            clean_uid,
+        )
+
+    wf_uid = _build_workflow_handle(clean_id, clean_uid, prefer_uid=True)
+    try:
+        return action(wf_uid, clean_uid, True)
+    except Exception as exc:
+        message = _workflow_query_not_found_message(clean_uid, exc)
+        if message:
+            raise SystemExit(
+                message
+                + f"\nA fallback query by UID {clean_uid!r} was also attempted and failed."
+            ) from None
+        raise
 
 
 def _query_keys_of_steps_or_exit(wf: Workflow, wf_id: str) -> List[str]:
@@ -773,6 +906,26 @@ def _download_artifact_with_retry(artifact, path, retries: int = 3, delay: int =
     raise RuntimeError(
         f"Artifact download failed after {retries} attempt(s): {last_exc}"
     ) from last_exc
+
+
+def _resolve_cli_workflow_reference(
+        work_dir: os.PathLike | None,
+        workflow_id: str | None,
+        operation_name: str | None = None,
+) -> tuple[str, str]:
+    clean_workflow_id = str(workflow_id or "").strip()
+    if work_dir:
+        workflow_log = os.path.join(work_dir, '.workflow.log')
+        if clean_workflow_id and not os.path.isfile(workflow_log):
+            if _looks_like_workflow_uid(clean_workflow_id):
+                return "", clean_workflow_id
+            return clean_workflow_id, ""
+        return _resolve_workflow_reference(
+            work_dir=work_dir,
+            workflow_id=clean_workflow_id or None,
+            operation_name=operation_name,
+        )
+    return clean_workflow_id, ""
 
 
 def _safe_get(obj, key, default=None):
@@ -953,13 +1106,16 @@ def main():
             format_print_table(t)
     elif args.cmd == "get":
         config_dflow(args.config)
-        wf_id = args.id
-        if not wf_id:
-            wf_id = get_id_from_record(args.work, 'get')
-        wf = Workflow(id=wf_id)
-        info = _query_workflow_or_exit(wf, wf_id)
+        wf_id, wf_uid = _resolve_cli_workflow_reference(args.work, args.id, 'get')
+        info = _run_with_workflow_fallback(
+            wf_id,
+            wf_uid,
+            lambda wf, _wf_ref, _used_uid: _query_workflow_or_exit(wf, _wf_ref),
+        )
         t = []
         t.append(["Name:", info.id])
+        if getattr(info, "uid", None):
+            t.append(["UID:", info.uid])
         t.append(["Status:", info.status.phase])
         t.append(["Created:", info.metadata.creationTimestamp])
         t.append(["Started:", info.status.startedAt])
@@ -1042,42 +1198,35 @@ def main():
             print()
     elif args.cmd == "getkeys":
         config_dflow(args.config)
-        wf_id = args.id
-        if not wf_id:
-            wf_id = get_id_from_record(args.work, 'getkeys')
-        wf = Workflow(id=wf_id)
-        keys = _query_keys_of_steps_or_exit(wf, wf_id)
+        wf_id, wf_uid = _resolve_cli_workflow_reference(args.work, args.id, 'getkeys')
+        keys = _run_with_workflow_fallback(
+            wf_id,
+            wf_uid,
+            lambda wf, _wf_ref, _used_uid: _query_keys_of_steps_or_exit(wf, _wf_ref),
+        )
         print("\n".join(keys))
     elif args.cmd == "delete":
         config_dflow(args.config)
-        wf_id = args.id
-        if not wf_id:
-            wf_id = get_id_from_record(args.work, 'delete')
-        wf = Workflow(id=wf_id)
+        wf_id, wf_uid = _resolve_cli_workflow_reference(args.work, args.id, 'delete')
+        wf = _build_workflow_handle(wf_id, wf_uid)
         wf.delete()
         print(f'Workflow deleted! (ID: {wf.id}, UID: {wf.uid})')
     elif args.cmd == "resubmit":
         config_dflow(args.config)
-        wf_id = args.id
-        if not wf_id:
-            wf_id = get_id_from_record(args.work, 'resubmit')
-        wf = Workflow(id=wf_id)
+        wf_id, wf_uid = _resolve_cli_workflow_reference(args.work, args.id, 'resubmit')
+        wf = _build_workflow_handle(wf_id, wf_uid)
         wf.resubmit()
         print(f'Workflow resubmitted... (ID: {wf.id}, UID: {wf.uid})')
     elif args.cmd == "resume":
         config_dflow(args.config)
-        wf_id = args.id
-        if not wf_id:
-            wf_id = get_id_from_record(args.work, 'resume')
-        wf = Workflow(id=wf_id)
+        wf_id, wf_uid = _resolve_cli_workflow_reference(args.work, args.id, 'resume')
+        wf = _build_workflow_handle(wf_id, wf_uid)
         wf.resume()
         print(f'Workflow resumed... (ID: {wf.id}, UID: {wf.uid})')
     elif args.cmd == "retry":
         config_dflow(args.config)
-        wf_id = args.id
-        if not wf_id:
-            wf_id = get_id_from_record(args.work, 'retry')
-        wf = Workflow(id=wf_id)
+        wf_id, wf_uid = _resolve_cli_workflow_reference(args.work, args.id, 'retry')
+        wf = _build_workflow_handle(wf_id, wf_uid)
         if args.step is not None:
             wf.retry_steps(args.step.split(","))
         else:
@@ -1085,39 +1234,37 @@ def main():
         print(f'Workflow retried... (ID: {wf.id}, UID: {wf.uid})')
     elif args.cmd == "stop":
         config_dflow(args.config)
-        wf_id = args.id
-        if not wf_id:
-            wf_id = get_id_from_record(args.work, 'stop')
-        wf = Workflow(id=wf_id)
+        wf_id, wf_uid = _resolve_cli_workflow_reference(args.work, args.id, 'stop')
+        wf = _build_workflow_handle(wf_id, wf_uid)
         wf.stop()
         print(f'Workflow stopped! (ID: {wf.id}, UID: {wf.uid})')
     elif args.cmd == "suspend":
         config_dflow(args.config)
-        wf_id = args.id
-        if not wf_id:
-            wf_id = get_id_from_record(args.work, 'suspend')
-        wf = Workflow(id=wf_id)
+        wf_id, wf_uid = _resolve_cli_workflow_reference(args.work, args.id, 'suspend')
+        wf = _build_workflow_handle(wf_id, wf_uid)
         wf.suspend()
         print(f'Workflow suspended... (ID: {wf.id}, UID: {wf.uid})')
     elif args.cmd == "terminate":
         config_dflow(args.config)
-        wf_id = args.id
-        if not wf_id:
-            wf_id = get_id_from_record(args.work, 'terminate')
-        wf = Workflow(id=wf_id)
+        wf_id, wf_uid = _resolve_cli_workflow_reference(args.work, args.id, 'terminate')
+        wf = _build_workflow_handle(wf_id, wf_uid)
         wf.terminate()
     elif args.cmd == 'retrieve':
         config_dflow(args.config)
-        wf_id = args.id
-        if not wf_id:
-            wf_id = get_id_from_record(args.work, 'retrieve')
-        wf = Workflow(id=wf_id)
+        wf_id, wf_uid = _resolve_cli_workflow_reference(args.work, args.id, 'retrieve')
         work_dir = args.work
-        all_keys = _query_keys_of_steps_or_exit(wf, wf_id)
-        wf_info = _query_workflow_or_exit(wf, wf_id)
+        all_keys, wf_info, query_ref = _run_with_workflow_fallback(
+            wf_id,
+            wf_uid,
+            lambda wf, _wf_ref, _used_uid: (
+                _query_keys_of_steps_or_exit(wf, _wf_ref),
+                _query_workflow_or_exit(wf, _wf_ref),
+                _wf_ref,
+            ),
+        )
         download_keys = [key for key in all_keys if _is_retrievable_result_step_key(key)]
         task_left = len(download_keys)
-        print(f'Retrieving {task_left} workflow results {wf_id} to {work_dir}')
+        print(f'Retrieving {task_left} workflow results {query_ref} to {work_dir}')
 
         for index, key in enumerate(download_keys, start=1):
             step = wf_info.get_step(key=key)[0]

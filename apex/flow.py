@@ -779,7 +779,10 @@ class FlowGenerator:
         log_file = os.path.join(self.download_path, '.workflow.log')
         with open(log_file, 'a') as f:
             timestamp = datetime.datetime.now().isoformat()
-            f.write(f'{self.workflow.id}\tsubmit\t{timestamp}\t{self.download_path}\n')
+            workflow_uid = getattr(self.workflow, "uid", "") or ""
+            f.write(
+                f'{self.workflow.id}\tsubmit\t{timestamp}\t{self.download_path}\t{workflow_uid}\n'
+            )
 
     def _set_relax_flow(
             self,
