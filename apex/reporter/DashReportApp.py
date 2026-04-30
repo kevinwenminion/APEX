@@ -82,6 +82,7 @@ class DashReportApp:
         self.port = port
         self.all_confs = set()
         self.all_props = set()
+        self._registered_clipboard_callbacks = set()
         self.app = dash.Dash(
             __name__,
             suppress_callback_exceptions=True,
@@ -352,9 +353,12 @@ class DashReportApp:
 
     def _generate_dynamic_callbacks(self, count):
         for index in range(count):
+            if index in self._registered_clipboard_callbacks:
+                continue
             self.app.callback(Output(f'clip-{index}', 'content'),
-            [Input(f'clip-{index}', 'n_clicks'),
-             State(f'table-{index}', 'data')])(self.csv_copy)
+                              [Input(f'clip-{index}', 'n_clicks'),
+                               State(f'table-{index}', 'data')])(self.csv_copy)
+            self._registered_clipboard_callbacks.add(index)
 
     def run(self, **kwargs):
         if self.open_browser:

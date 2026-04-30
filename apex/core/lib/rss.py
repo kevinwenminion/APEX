@@ -654,9 +654,46 @@ def generate_rss(
     accepted_moves = 0
     attempted_moves = 0
     last_improve_step = 0
-    sampled_species = []
-    sampled_steps = []
+    sampled_cache = []
+    sampled_cache_index = {}
+    interval_checkpoints = []
     near_target_threshold = max(5.0 * tol, 1e-2)
+
+    def _store_sample(species_snapshot, step_value, rmse_value):
+        key = tuple(species_snapshot)
+        existing_index = sampled_cache_index.get(key)
+        entry = {
+            "species": list(species_snapshot),
+            "step": int(step_value),
+            "rmse": float(rmse_value),
+        }
+
+        if existing_index is not None:
+            existing_entry = sampled_cache[existing_index]
+            if (
+                entry["rmse"] < existing_entry["rmse"] - 1e-12
+                or (
+                    abs(entry["rmse"] - existing_entry["rmse"]) <= 1e-12
+                    and entry["step"] < existing_entry["step"]
+                )
+            ):
+                sampled_cache[existing_index] = entry
+            else:
+                return
+        else:
+            sampled_cache.append(entry)
+
+        sampled_cache.sort(key=lambda item: (item["rmse"], item["step"]))
+        if len(sampled_cache) > num_configs:
+            removed_entry = sampled_cache.pop()
+            sampled_cache_index.pop(tuple(removed_entry["species"]), None)
+        sampled_cache_index.clear()
+        for index, cached_entry in enumerate(sampled_cache):
+            sampled_cache_index[tuple(cached_entry["species"])] = index
+
+    def _register_local_minimum(left, middle, right):
+        if middle["rmse"] <= left["rmse"] and middle["rmse"] <= right["rmse"]:
+            _store_sample(middle["species"], middle["step"], middle["rmse"])
     progress_bar = None
     if show_progress:
         if tqdm is None:
@@ -718,13 +755,20 @@ def generate_rss(
         else:
             state_species[i], state_species[j] = state_species[j], state_species[i]
 
-        if (
-            len(sampled_species) < num_configs
-            and current_gap_metrics["rmse"] <= near_target_threshold
-            and step % interval == 0
-        ):
-            sampled_species.append(list(state_species))
-            sampled_steps.append(step)
+        if current_gap_metrics["rmse"] <= near_target_threshold and step % interval == 0:
+            interval_checkpoints.append(
+                {
+                    "species": list(state_species),
+                    "step": step,
+                    "rmse": float(current_gap_metrics["rmse"]),
+                }
+            )
+            if len(interval_checkpoints) >= 3:
+                _register_local_minimum(
+                    interval_checkpoints[-3],
+                    interval_checkpoints[-2],
+                    interval_checkpoints[-1],
+                )
 
         if progress_bar is not None:
             progress_bar.update(1)
@@ -742,19 +786,40 @@ def generate_rss(
     if progress_bar is not None:
         progress_bar.close()
 
+    if len(interval_checkpoints) == 1:
+        checkpoint = interval_checkpoints[0]
+        _store_sample(checkpoint["species"], checkpoint["step"], checkpoint["rmse"])
+    elif len(interval_checkpoints) >= 2:
+        terminal_left = interval_checkpoints[-2]
+        terminal_right = interval_checkpoints[-1]
+        if terminal_right["rmse"] <= terminal_left["rmse"]:
+            _store_sample(
+                terminal_right["species"],
+                terminal_right["step"],
+                terminal_right["rmse"],
+            )
+
     if num_configs == 1:
         decorated = _reconstruct_structure(parent, best_species)
     else:
+        sampled_species = [entry["species"] for entry in sampled_cache]
+        sampled_steps = [entry["step"] for entry in sampled_cache]
+        sampled_rmses = [entry["rmse"] for entry in sampled_cache]
         if not sampled_species:
             sampled_species.append(list(best_species))
             sampled_steps.append(-1)
+            sampled_rmses.append(float(best_gap_metrics["rmse"]))
         while len(sampled_species) < num_configs:
             sampled_species.append(list(best_species))
             sampled_steps.append(-1)
+            sampled_rmses.append(float(best_gap_metrics["rmse"]))
         decorated = [
             _reconstruct_structure(parent, sp)
             for sp in sampled_species[:num_configs]
         ]
+    if num_configs == 1:
+        sampled_steps = []
+        sampled_rmses = []
 
     if best_gap_metrics["rmse"] > max(10.0 * tol, 0.1):
         warnings.warn(
@@ -791,6 +856,7 @@ def generate_rss(
             "num_configs": num_configs,
             "interval": interval,
             "sampled_steps": sampled_steps,
+            "sampled_rmses": sampled_rmses,
             "near_target_threshold": near_target_threshold,
             "patience": patience,
         },

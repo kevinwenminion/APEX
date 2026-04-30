@@ -37,6 +37,7 @@ class TestFlowModule(unittest.TestCase):
             with open(logf, "r") as fp:
                 content = fp.read()
             self.assertIn("wf-id", content)
+            self.assertIn("wf-uid", content)
             self.assertIn("submit", content)
             self.assertIn(td, content)
 

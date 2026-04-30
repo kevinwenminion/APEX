@@ -223,7 +223,7 @@ Example:
 
 21. `interval`
 - Type: `int`, default `100`
-- Meaning: Sampling interval (in MC steps) for multi-configuration output.
+- Meaning: Checkpoint interval (in MC steps) used to detect and cache local minima for multi-configuration output.
 
 22. `metadata`
 - Type: `bool`, default `true`

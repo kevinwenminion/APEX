@@ -452,7 +452,7 @@ class TestGuiSubmitBuilder(unittest.TestCase):
         self.assertEqual(args.count("--port"), 1)
         self.assertIn("8090", args)
 
-    def test_finalize_pipeline_retrieves_and_reports_without_archive(self):
+    def test_finalize_pipeline_retrieves_then_runs_local_archive_and_report(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             commands = []
 
@@ -460,21 +460,17 @@ class TestGuiSubmitBuilder(unittest.TestCase):
                 commands.append(arguments)
                 self.assertEqual(cwd, tmpdir)
                 if arguments[0] == "retrieve":
-                    with open(os.path.join(tmpdir, "all_result.json"), "w", encoding="utf-8") as f:
-                        f.write("{}")
                     return {"ok": True, "message": "retrieved"}
-                if arguments[0] == "archive":
-                    self.fail("finalize pipeline must not run archive")
                 return {"ok": False, "message": "unexpected command"}
 
-            def fake_run_report_in_background(config_file, report_target, cwd):
-                self.assertEqual(config_file, "global.json")
-                self.assertEqual(report_target, tmpdir)
-                self.assertEqual(cwd, tmpdir)
-                return {"ok": True, "message": "report started"}
+            def fake_run_archive_and_report_pipeline(workdir, global_file, param_file):
+                self.assertEqual(workdir, tmpdir)
+                self.assertEqual(global_file, "global.json")
+                self.assertEqual(param_file, "param.json")
+                return {"ok": True, "message": "Local archive + report completed. all_result.json: test. report started"}
 
             with mock.patch.object(gui_module, "_run_apex_command", side_effect=fake_run_apex_command), \
-                    mock.patch.object(gui_module, "_run_report_in_background", side_effect=fake_run_report_in_background):
+                    mock.patch.object(gui_module, "_run_archive_and_report_pipeline", side_effect=fake_run_archive_and_report_pipeline):
                 feedback = _run_finalize_pipeline(
                     workdir=tmpdir,
                     workflow_id="wf-new",
@@ -483,7 +479,7 @@ class TestGuiSubmitBuilder(unittest.TestCase):
 
             self.assertTrue(feedback["ok"])
             self.assertEqual(commands, [["retrieve", "-i", "wf-new", "-w", tmpdir, "-c", "global.json"]])
-            self.assertIn("Retrieve + report completed", feedback["message"])
+            self.assertIn("Retrieve + local archive + report completed", feedback["message"])
 
     def test_finalize_retrieve_status_reports_running_message(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -595,8 +591,6 @@ class TestGuiSubmitBuilder(unittest.TestCase):
             status_file = os.path.join(tmpdir, ".apex-retrieve.status")
             with open(status_file, "w", encoding="utf-8") as f:
                 f.write("0")
-            with open(os.path.join(tmpdir, "all_result.json"), "w", encoding="utf-8") as f:
-                f.write("{}")
             state = {
                 "workdir": tmpdir,
                 "global_file": "global.json",
@@ -604,13 +598,19 @@ class TestGuiSubmitBuilder(unittest.TestCase):
                     "status": "running",
                     "workdir": tmpdir,
                     "global_file": "global.json",
+                    "param_file": "param.json",
+                    "pending_report": True,
                     "status_file": status_file,
                     "log_file": os.path.join(tmpdir, "apex-retrieve.log"),
                     "command": "apex retrieve",
                 },
             }
 
-            with mock.patch.object(gui_module, "_run_report_in_background", return_value={"ok": True, "message": "report started"}):
+            with mock.patch.object(
+                gui_module,
+                "_run_archive_and_report_pipeline",
+                return_value={"ok": True, "message": "Local archive + report completed. all_result.json: test. report started"},
+            ):
                 value, label, animated, text, next_state, feedback = _finalize_retrieve_status(state)
 
             self.assertEqual(value, 100)
@@ -620,7 +620,37 @@ class TestGuiSubmitBuilder(unittest.TestCase):
             self.assertEqual(next_state.get("status"), "done")
             self.assertEqual(next_state.get("workdir"), tmpdir)
             self.assertEqual(next_state.get("completed_text"), ["Retrieve finished; report started."])
-            self.assertIn("Retrieve + report completed", feedback["message"])
+            self.assertIn("Retrieve + local archive + report completed", feedback["message"])
+
+    def test_finalize_retrieve_status_marks_done_without_report_when_not_requested(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            status_file = os.path.join(tmpdir, ".apex-retrieve.status")
+            with open(status_file, "w", encoding="utf-8") as f:
+                f.write("0")
+            state = {
+                "workdir": tmpdir,
+                "global_file": "global.json",
+                "retrieve": {
+                    "status": "running",
+                    "workdir": tmpdir,
+                    "global_file": "global.json",
+                    "param_file": "param.json",
+                    "pending_report": False,
+                    "status_file": status_file,
+                    "log_file": os.path.join(tmpdir, "apex-retrieve.log"),
+                },
+            }
+
+            with mock.patch.object(gui_module, "_run_archive_and_report_pipeline") as mocked_pipeline:
+                value, label, animated, text, next_state, feedback = _finalize_retrieve_status(state)
+
+            self.assertEqual(value, 100)
+            self.assertEqual(label, "Done")
+            self.assertFalse(animated)
+            self.assertEqual(text, "Retrieve finished.")
+            self.assertEqual(next_state.get("status"), "done")
+            self.assertIs(feedback, gui_module.dash.no_update)
+            mocked_pipeline.assert_not_called()
 
     def test_submit_status_file_is_not_treated_as_retrieve_feedback(self):
         self.assertFalse(

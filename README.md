@@ -753,6 +753,10 @@ apex preview gammaline.json
 Nested dictionaries (`fcc`, `bcc`, `hcp`, etc.) override the top-level parameters for the corresponding lattice type.
 
 Similarly, to investigate Gamma Surface, change the type to `gamma_surface`, and adjust steps accordingly.
+`gamma_surface` keeps the same crystallographic interface: `plane_miller` and
+`slip_direction` define the in-plane fault basis, `vacuum_size = 0` gives a
+bulk-like periodic generalized stacking-fault calculation, and `vacuum_size > 0`
+adds vacuum along the selected fault normal for slab/free-surface calculations.
 
 ```json
 "properties": [

@@ -646,7 +646,18 @@ def _completed_retrieve_state(
         "status_file": status_file,
         "completed_text": text,
         "report_url": report_url,
+        "pending_report": False,
     }
+
+
+def _has_local_reportable_results(workdir: str) -> bool:
+    target_workdir = _normalize_workdir(workdir)
+    if os.path.isfile(os.path.join(target_workdir, "all_result.json")):
+        return True
+    for root, _dirs, files in os.walk(target_workdir):
+        if "result.json" in files:
+            return True
+    return False
 
 
 def _read_log_tail(log_path: str = "apex.log", max_lines: int = 400, workdir: Optional[str] = None) -> str:
@@ -2171,11 +2182,9 @@ def _run_report_in_background(
     }
 
 
-def _ensure_local_all_result(workdir: str, global_file: str, param_file: str) -> Tuple[bool, str]:
+def _run_local_archive(workdir: str, global_file: str, param_file: str) -> Tuple[bool, str]:
     target_workdir = _normalize_workdir(workdir)
     all_result_path = os.path.join(target_workdir, "all_result.json")
-    if os.path.isfile(all_result_path):
-        return True, all_result_path
 
     resolved_global = _resolve_file_path(target_workdir, global_file or "global.json")
     resolved_param = _resolve_file_path(target_workdir, param_file or "param.json")
@@ -2213,6 +2222,32 @@ def _ensure_local_all_result(workdir: str, global_file: str, param_file: str) ->
     return True, all_result_path
 
 
+def _ensure_local_all_result(workdir: str, global_file: str, param_file: str) -> Tuple[bool, str]:
+    target_workdir = _normalize_workdir(workdir)
+    all_result_path = os.path.join(target_workdir, "all_result.json")
+    if os.path.isfile(all_result_path):
+        return True, all_result_path
+    return _run_local_archive(target_workdir, global_file, param_file)
+
+
+def _run_archive_and_report_pipeline(workdir: str, global_file: str, param_file: str) -> Dict[str, Any]:
+    ok, payload = _run_local_archive(workdir, global_file, param_file)
+    if not ok:
+        return _build_feedback(f"Local archive failed: {payload}")
+    all_result_path = payload
+
+    report_feedback = _run_report_in_background(global_file, workdir, cwd=workdir)
+    if not report_feedback.get("ok"):
+        report_feedback["message"] = f"Report failed. {report_feedback.get('message', '')}".strip()
+        return report_feedback
+
+    report_feedback["message"] = (
+        f"Local archive + report completed. all_result.json: {all_result_path}. "
+        f"{report_feedback.get('message', '')}"
+    )
+    return report_feedback
+
+
 def _run_finalize_pipeline(workdir: str, workflow_id: str, global_file: str) -> Dict[str, Any]:
     retrieve_feedback = _run_apex_command(
         ["retrieve", "-i", workflow_id, "-w", workdir, "-c", global_file],
@@ -2222,22 +2257,13 @@ def _run_finalize_pipeline(workdir: str, workflow_id: str, global_file: str) -> 
         retrieve_feedback["message"] = f"Retrieve failed. {retrieve_feedback.get('message', '')}".strip()
         return retrieve_feedback
 
-    all_result_path = os.path.join(workdir, "all_result.json")
-    if not os.path.isfile(all_result_path):
-        ok, payload = _ensure_local_all_result(workdir, global_file, "param.json")
-        if not ok:
-            return _build_feedback(f"Retrieve finished but all_result.json was not generated: {payload}")
-        all_result_path = payload
-
-    report_feedback = _run_report_in_background(global_file, workdir, cwd=workdir)
-    if not report_feedback.get("ok"):
-        report_feedback["message"] = f"Report failed. {report_feedback.get('message', '')}".strip()
-        return report_feedback
-
-    report_feedback["message"] = (
-        f"Retrieve + report completed. all_result.json: {all_result_path}. "
-        f"{report_feedback.get('message', '')}"
-    )
+    report_feedback = _run_archive_and_report_pipeline(workdir, global_file, "param.json")
+    if report_feedback.get("ok"):
+        report_feedback["message"] = report_feedback["message"].replace(
+            "Local archive + report completed.",
+            "Retrieve + local archive + report completed.",
+            1,
+        )
     return report_feedback
 
 
@@ -2275,6 +2301,7 @@ def _finalize_retrieve_status(state_payload: Dict[str, Any]) -> Tuple[int, str, 
     workdir = retrieve_state.get("workdir") or state_payload.get("workdir") or os.getcwd()
     global_file = retrieve_state.get("global_file") or state_payload.get("global_file") or "global.json"
     param_file = retrieve_state.get("param_file") or state_payload.get("param_file") or "param.json"
+    pending_report = bool(retrieve_state.get("pending_report"))
     if not status_file or not os.path.isfile(status_file):
         log_text = _read_log_tail(log_file, max_lines=200, workdir=None) if log_file else ""
         progress = _parse_retrieve_progress_from_log(log_text)
@@ -2298,30 +2325,21 @@ def _finalize_retrieve_status(state_payload: Dict[str, Any]) -> Tuple[int, str, 
         feedback["stderr"] = log_tail
         return 100, "Failed", False, "Retrieve failed. See apex-retrieve.log.", {}, feedback
 
-    all_result_path = os.path.join(workdir, "all_result.json")
-    if not os.path.isfile(all_result_path):
-        ok, payload = _ensure_local_all_result(workdir, global_file, param_file)
-        if not ok:
-            feedback = _build_feedback(f"Retrieve finished but all_result.json was not generated: {payload}")
-            feedback["command"] = retrieve_state.get("command", "")
-            feedback["returncode"] = return_code
-            feedback["stdout"] = _read_log_tail(log_file, max_lines=80, workdir=None) if log_file else ""
-            completed_state = _completed_retrieve_state(
-                workdir=workdir,
-                workflow_id=retrieve_state.get("workflow_id", ""),
-                workflow_ids=retrieve_state.get("workflow_ids", []),
-                global_file=global_file,
-                param_file=param_file,
-                text="Retrieve finished; all_result.json missing.",
-                log_file=log_file,
-                status_file=status_file,
-            )
-            return 100, "Done", False, "Retrieve finished; all_result.json missing.", completed_state, feedback
-        all_result_path = payload
+    if not pending_report:
+        completed_state = _completed_retrieve_state(
+            workdir=workdir,
+            workflow_id=retrieve_state.get("workflow_id", ""),
+            workflow_ids=retrieve_state.get("workflow_ids", []),
+            global_file=global_file,
+            param_file=param_file,
+            text="Retrieve finished.",
+            log_file=log_file,
+            status_file=status_file,
+        )
+        return 100, "Done", False, "Retrieve finished.", completed_state, dash.no_update
 
-    report_feedback = _run_report_in_background(global_file, workdir, cwd=workdir)
+    report_feedback = _run_archive_and_report_pipeline(workdir, global_file, param_file)
     if not report_feedback.get("ok"):
-        report_feedback["message"] = f"Report failed. {report_feedback.get('message', '')}".strip()
         completed_state = _completed_retrieve_state(
             workdir=workdir,
             workflow_id=retrieve_state.get("workflow_id", ""),
@@ -2334,9 +2352,10 @@ def _finalize_retrieve_status(state_payload: Dict[str, Any]) -> Tuple[int, str, 
         )
         return 100, "Done", False, "Retrieve finished; report failed.", completed_state, report_feedback
 
-    report_feedback["message"] = (
-        f"Retrieve + report completed. all_result.json: {all_result_path}. "
-        f"{report_feedback.get('message', '')}"
+    report_feedback["message"] = report_feedback["message"].replace(
+        "Local archive + report completed.",
+        "Retrieve + local archive + report completed.",
+        1,
     )
     completed_text = _report_started_children(report_feedback.get("report_url", ""))
     completed_state = _completed_retrieve_state(
@@ -2625,7 +2644,7 @@ class ApexGuiApp:
                                 html.Br(),
                                 dbc.Button("Reset", id="submit-reset", color="secondary", className="me-2"),
                                 dbc.Button("Submit", id="submit-run", color="primary", className="me-2"),
-                                dbc.Button("Retrieve + Report", id="submit-finalize", color="success"),
+                                dbc.Button("Report", id="submit-finalize", color="success"),
                             ],
                             md=5,
                         ),
@@ -3302,7 +3321,14 @@ class ApexGuiApp:
                     workflow_ids = _merge_workflow_ids(_read_latest_workflow_id(workdir))
                 workflow_id_text = _format_workflow_ids(workflow_ids)
                 if not workflow_ids:
-                    feedback = _build_feedback("Workflow ID is required for retrieve/report. Fill it or submit first.")
+                    if (
+                        isinstance(retrieve_state, dict)
+                        and retrieve_state.get("status") == "done"
+                        and _normalize_workdir(retrieve_state.get("workdir") or workdir) == workdir
+                    ) or _has_local_reportable_results(workdir):
+                        report_feedback = _run_archive_and_report_pipeline(workdir, global_file, param_file)
+                        return report_feedback, False, default_confirm_message, state_payload, current_workflow_id
+                    feedback = _build_feedback("Workflow ID is required for report. Fill it or submit first.")
                     return feedback, False, default_confirm_message, state_payload, ""
                 if _retrieve_state_is_active(retrieve_state):
                     active_workflow_id = ""
@@ -3310,12 +3336,29 @@ class ApexGuiApp:
                         active_workflow_id = retrieve_state.get("workflow_id", "") or workflow_id_text
                     feedback = _build_feedback(
                         f"Retrieve is already running for workflow {active_workflow_id}. "
-                        "Wait for it to finish before starting another Retrieve + Report.",
-                        ok=False,
+                        "Report will start automatically after retrieve finishes.",
+                        ok=True,
                     )
+                    feedback["operation"] = "report-request"
+                    feedback["workdir"] = workdir
+                    feedback["workflow_id"] = active_workflow_id or workflow_id_text
+                    feedback["workflow_ids"] = workflow_ids
+                    feedback["global_file"] = global_file
+                    feedback["param_file"] = param_file
+                    feedback["pending_report"] = True
                     state_payload["workflow_id"] = active_workflow_id or workflow_id_text
                     state_payload["workflow_ids"] = workflow_ids
                     return feedback, False, default_confirm_message, state_payload, active_workflow_id or workflow_id_text
+
+                if (
+                    isinstance(retrieve_state, dict)
+                    and retrieve_state.get("status") == "done"
+                    and _normalize_workdir(retrieve_state.get("workdir") or workdir) == workdir
+                ) or _has_local_reportable_results(workdir):
+                    report_feedback = _run_archive_and_report_pipeline(workdir, global_file, param_file)
+                    state_payload["workflow_id"] = workflow_id_text
+                    state_payload["workflow_ids"] = workflow_ids
+                    return report_feedback, False, default_confirm_message, state_payload, workflow_id_text
 
                 final_feedback = _start_retrieve_in_background(
                     workdir=workdir,
@@ -3323,6 +3366,7 @@ class ApexGuiApp:
                     global_file=global_file,
                 )
                 final_feedback["param_file"] = param_file
+                final_feedback["pending_report"] = True
                 state_payload["workflow_id"] = workflow_id_text
                 state_payload["workflow_ids"] = workflow_ids
                 return final_feedback, False, default_confirm_message, state_payload, workflow_id_text
@@ -3627,9 +3671,22 @@ class ApexGuiApp:
             Output("retrieve-state", "data", allow_duplicate=True),
             Input("command-result", "data"),
             State("submit-state", "data"),
+            State("retrieve-state", "data"),
             prevent_initial_call=True,
         )
-        def _sync_retrieve_state(payload, submit_state):
+        def _sync_retrieve_state(payload, submit_state, retrieve_state):
+            if not isinstance(payload, dict):
+                return dash.no_update
+            if payload.get("operation") == "report-request":
+                current_state = copy.deepcopy(retrieve_state) if isinstance(retrieve_state, dict) else {}
+                submit_payload = submit_state if isinstance(submit_state, dict) else {}
+                current_state["workdir"] = payload.get("workdir") or current_state.get("workdir") or submit_payload.get("workdir") or os.getcwd()
+                current_state["workflow_id"] = payload.get("workflow_id") or current_state.get("workflow_id") or submit_payload.get("workflow_id") or ""
+                current_state["workflow_ids"] = payload.get("workflow_ids") or current_state.get("workflow_ids") or submit_payload.get("workflow_ids") or []
+                current_state["global_file"] = payload.get("global_file") or current_state.get("global_file") or submit_payload.get("global_file") or "global.json"
+                current_state["param_file"] = payload.get("param_file") or current_state.get("param_file") or submit_payload.get("param_file") or "param.json"
+                current_state["pending_report"] = True
+                return current_state
             if not _is_retrieve_feedback(payload):
                 return dash.no_update
             state_payload = submit_state if isinstance(submit_state, dict) else {}
@@ -3643,6 +3700,7 @@ class ApexGuiApp:
                 "log_file": payload.get("log_file", ""),
                 "status_file": payload.get("status_file", ""),
                 "command": payload.get("command", ""),
+                "pending_report": bool(payload.get("pending_report")),
             }
 
         @self.app.callback(

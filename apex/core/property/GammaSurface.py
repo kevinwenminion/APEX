@@ -30,6 +30,8 @@ upload_packages.append(__file__)
 class GammaSurface(Property):
     """Calculation of generalized stacking fault energy surface."""
 
+    _VECTOR_TOL = 1e-8
+
     def __init__(self, parameter, inter_param=None):
         parameter["reproduce"] = parameter.get("reproduce", False)
         self.reprod = parameter["reproduce"]
@@ -253,7 +255,15 @@ class GammaSurface(Property):
                 self.slip_length = slip_length_x
                 self.slip_length_y = slip_length_y
 
-                top_atoms = np.where(slab.frac_coords[:, 2] > 0.5)[0]
+                # In the oriented cell, frac_z ~= 0.5 is the fault plane and the
+                # upper half is displaced relative to the lower half.
+                plane_cut_tol = 1e-6
+                top_atoms = np.where(slab.frac_coords[:, 2] > 0.5 + plane_cut_tol)[0]
+                if len(top_atoms) == 0 or len(top_atoms) == len(slab.sites):
+                    raise RuntimeError(
+                        "Gamma surface failed to partition the slab into upper and lower halves. "
+                        "Please check plane_miller, slip_direction, plane_shift, and supercell_size."
+                    )
                 n_steps_x = int(self.n_steps_x)
                 n_steps_y = int(self.n_steps_y)
                 n_steps_x_denom = max(n_steps_x, 1)
@@ -272,8 +282,9 @@ class GammaSurface(Property):
                                 os.remove(jj)
                         task_list.append(output_task)
 
-                        disp_cart = np.array(
-                            [slip_length_x * frac_x, slip_length_y * frac_y, 0.0]
+                        disp_cart = (
+                            self._inplane_x_cartesian * (slip_length_x * frac_x)
+                            + self._inplane_y_cartesian * (slip_length_y * frac_y)
                         )
                         slab_task = slab.copy()
                         if np.linalg.norm(disp_cart) > 0:
@@ -297,6 +308,13 @@ class GammaSurface(Property):
                                 "frac_y": frac_y,
                                 "idx_x": idx_x,
                                 "idx_y": idx_y,
+                                "disp_cart": disp_cart.tolist(),
+                                "plane_miller": list(self.plane_miller),
+                                "slip_direction": list(self.slip_direction),
+                                "fault_normal_cartesian": self._fault_normal_cartesian.tolist(),
+                                "inplane_x_cartesian": self._inplane_x_cartesian.tolist(),
+                                "inplane_y_cartesian": self._inplane_y_cartesian.tolist(),
+                                "fault_area": self._fault_area,
                             },
                             "displacement.json",
                         )
@@ -319,6 +337,72 @@ class GammaSurface(Property):
                 "is allowed for slip_length/slip_length_y"
             )
 
+    def __normalize_vector(self, vector, label):
+        vector = np.array(vector, dtype=float)
+        norm = np.linalg.norm(vector, 2)
+        if norm <= self._VECTOR_TOL:
+            raise RuntimeError(f"Gamma surface {label} has near-zero norm")
+        return vector / norm
+
+    def __cartesian_direction(self, structure: Structure, miller_direction):
+        return np.dot(np.array(miller_direction, dtype=float), structure.lattice.matrix)
+
+    def __cartesian_plane_normal(self, structure: Structure, plane_miller):
+        reciprocal = structure.lattice.reciprocal_lattice.matrix
+        return np.dot(np.array(plane_miller, dtype=float), reciprocal)
+
+    def __validate_inplane_vector(self, vector, normal, label):
+        if abs(np.dot(vector, normal)) > 1e-6:
+            raise RuntimeError(f"Gamma surface {label} is not in the selected slip plane")
+
+    def __validate_parallel(self, vector, reference, label):
+        cross_norm = np.linalg.norm(np.cross(vector, reference), 2)
+        if cross_norm > 1e-6:
+            raise RuntimeError(
+                f"Gamma surface {label} is inconsistent with the selected crystallographic orientation"
+            )
+
+    def __set_orientation_metadata(self, x_vector, y_vector, normal_vector, trans_matrix):
+        oriented_x = self.__normalize_vector(
+            np.dot(trans_matrix, x_vector), "reoriented in-plane x direction"
+        )
+        oriented_y = self.__normalize_vector(
+            np.dot(trans_matrix, y_vector), "reoriented in-plane y direction"
+        )
+        oriented_normal = self.__normalize_vector(
+            np.dot(trans_matrix, normal_vector), "reoriented fault normal"
+        )
+        self.__validate_inplane_vector(oriented_x, oriented_normal, "in-plane x direction")
+        self.__validate_inplane_vector(oriented_y, oriented_normal, "in-plane y direction")
+        cross_xy = self.__normalize_vector(
+            np.cross(oriented_x, oriented_y), "cross product of in-plane directions"
+        )
+        self.__validate_parallel(cross_xy, oriented_normal, "in-plane basis handedness")
+        self._inplane_x_cartesian = oriented_x
+        self._inplane_y_cartesian = oriented_y
+        self._fault_normal_cartesian = oriented_normal
+
+    def __rebuild_oriented_lattice(self, slab: Structure):
+        a, b, c = slab.lattice.matrix
+        normal = self._fault_normal_cartesian
+        a_inplane = a - np.dot(a, normal) * normal
+        b_inplane = b - np.dot(b, normal) * normal
+        c_height = abs(np.dot(c, normal))
+        if c_height <= self._VECTOR_TOL:
+            raise RuntimeError(
+                "Gamma surface slab has near-zero normal thickness after lattice reorientation. "
+                "Please check plane_miller/slip_direction/supercell_size."
+            )
+        rebuilt_lattice = np.array([a_inplane, b_inplane, c_height * normal])
+        rebuilt = Structure(
+            lattice=rebuilt_lattice,
+            species=slab.species,
+            coords=slab.cart_coords,
+            coords_are_cartesian=True,
+            to_unit_cell=True,
+        )
+        return rebuilt
+
     def __convert_input_miller(self, structure: Structure):
         plane_miller = tuple(self.plane_miller)
         slip_direction = tuple(self.slip_direction)
@@ -327,12 +411,14 @@ class GammaSurface(Property):
         plane_str = "".join([str(i) for i in plane_miller])
         slip_str = "".join([str(i) for i in slip_direction])
         combined_key = "x".join([plane_str, slip_str])
-        l2_normalize_1d = lambda v: v / np.linalg.norm(v, 2)
+        xy_miller = None
 
         dir_dict = SlabSlipSystem.atomic_system_dict()
         try:
             system = dir_dict[self.structure_type]
-            plane_miller, x_miller, xy_miller, stored_slip_length = system[combined_key].values()
+            plane_miller, x_miller, xy_miller, stored_slip_length = system[
+                combined_key
+            ].values()
         except KeyError:
             logging.warning(
                 "Input slip system is not pre-defined in GammaSurface. "
@@ -348,33 +434,59 @@ class GammaSurface(Property):
                     plane_miller = plane_miller_bravais_to_miller(self.plane_miller)
                 if len(x_miller) == 4:
                     x_miller = direction_miller_bravais_to_miller(self.slip_direction)
-            dir_dot = np.array(plane_miller).dot(np.array(x_miller))
+        else:
+            if not slip_length:
+                slip_length = stored_slip_length
+
+        if self.structure_type in ["bcc", "fcc"]:
+            dir_dot = int(np.dot(np.array(plane_miller), np.array(x_miller)))
             if dir_dot != 0:
                 raise RuntimeError(
                     f"slip direction {self.slip_direction} is not on plane given {self.plane_miller}"
                 )
-            x_cartesian = np.dot(np.array(x_miller), structure.lattice.matrix)
-            z_cartesian = np.dot(np.array(plane_miller), structure.lattice.matrix)
-            x_cartesian_unit_vector = l2_normalize_1d(x_cartesian)
-            y_cartesian_unit_vector = l2_normalize_1d(np.cross(z_cartesian, x_cartesian))
-            z_cartesian_unit_vector = l2_normalize_1d(
-                np.cross(x_cartesian_unit_vector, y_cartesian_unit_vector)
-            )
+
+        x_cartesian = self.__cartesian_direction(structure, x_miller)
+        normal_cartesian = self.__cartesian_plane_normal(structure, plane_miller)
+        x_cartesian_unit_vector = self.__normalize_vector(
+            x_cartesian, "slip direction"
+        )
+        z_cartesian_unit_vector = self.__normalize_vector(
+            normal_cartesian, "fault normal"
+        )
+        self.__validate_inplane_vector(
+            x_cartesian_unit_vector, z_cartesian_unit_vector, "slip direction"
+        )
+
+        if xy_miller is not None:
+            xy_cartesian = self.__cartesian_direction(structure, xy_miller)
+            y_cartesian = xy_cartesian - np.dot(xy_cartesian, z_cartesian_unit_vector) * z_cartesian_unit_vector
         else:
-            if not slip_length:
-                slip_length = stored_slip_length
-            x_cartesian = np.dot(np.array(x_miller), structure.lattice.matrix)
-            xy_cartesian = np.dot(np.array(xy_miller), structure.lattice.matrix)
-            x_cartesian_unit_vector = l2_normalize_1d(x_cartesian)
-            z_cartesian_unit_vector = l2_normalize_1d(np.cross(x_cartesian, xy_cartesian))
-            y_cartesian_unit_vector = l2_normalize_1d(
-                np.cross(z_cartesian_unit_vector, x_cartesian_unit_vector)
-            )
-        finally:
-            reoriented_basis = np.array(
-                [x_cartesian_unit_vector, y_cartesian_unit_vector, z_cartesian_unit_vector]
-            )
-            Q = trans_mat_basis(reoriented_basis)
+            y_cartesian = np.cross(z_cartesian_unit_vector, x_cartesian_unit_vector)
+        y_cartesian_unit_vector = self.__normalize_vector(
+            y_cartesian, "secondary in-plane direction"
+        )
+        if np.dot(np.cross(x_cartesian_unit_vector, y_cartesian_unit_vector), z_cartesian_unit_vector) < 0:
+            y_cartesian_unit_vector = -y_cartesian_unit_vector
+        z_cartesian_unit_vector = self.__normalize_vector(
+            np.cross(x_cartesian_unit_vector, y_cartesian_unit_vector),
+            "fault normal from in-plane basis",
+        )
+        self.__validate_inplane_vector(
+            y_cartesian_unit_vector, z_cartesian_unit_vector, "secondary in-plane direction"
+        )
+        self.__validate_parallel(
+            z_cartesian_unit_vector,
+            self.__normalize_vector(normal_cartesian, "fault normal"),
+            "fault normal",
+        )
+
+        reoriented_basis = np.array(
+            [x_cartesian_unit_vector, y_cartesian_unit_vector, z_cartesian_unit_vector]
+        )
+        Q = trans_mat_basis(reoriented_basis)
+        self.__set_orientation_metadata(
+            x_cartesian_unit_vector, y_cartesian_unit_vector, z_cartesian_unit_vector, Q
+        )
 
         return plane_miller, x_miller, slip_length, Q
 
@@ -395,13 +507,14 @@ class GammaSurface(Property):
         )
         slabs_pmg = slab_gen.get_slabs(ftol=0.001)
         slab = [s for s in slabs_pmg if s.miller_index == plane_miller][0]
-        if trans_matrix.any():
+        if trans_matrix is not None and np.any(trans_matrix):
             reoriented_lattice_vectors = [trans_matrix.dot(v) for v in slab.lattice.matrix]
             slab = Structure(
                 lattice=np.array(reoriented_lattice_vectors),
                 coords=slab.frac_coords,
                 species=slab.species,
             )
+            slab = self.__rebuild_oriented_lattice(slab)
 
         order = zip(slab.frac_coords, slab.species)
         c_order = sorted(order, key=lambda x: x[0][2])
@@ -436,6 +549,24 @@ class GammaSurface(Property):
         slab.make_supercell(
             scaling_matrix=[self.supercell_size[0], self.supercell_size[1], 1]
         )
+        final_a, final_b, final_c = slab.lattice.matrix
+        final_c_unit = self.__normalize_vector(final_c, "final slab normal direction")
+        self.__validate_parallel(
+            final_c_unit, self._fault_normal_cartesian, "final slab c vector"
+        )
+        self.__validate_inplane_vector(
+            self.__normalize_vector(final_a, "final slab a vector"),
+            self._fault_normal_cartesian,
+            "final slab a vector",
+        )
+        self.__validate_inplane_vector(
+            self.__normalize_vector(final_b, "final slab b vector"),
+            self._fault_normal_cartesian,
+            "final slab b vector",
+        )
+        self._fault_area = float(np.linalg.norm(np.cross(final_a, final_b), 2))
+        if self._fault_area <= self._VECTOR_TOL:
+            raise RuntimeError("Gamma surface fault area must be positive")
         return slab
 
     def __poscar_fix(self, poscar) -> None:
@@ -492,6 +623,14 @@ class GammaSurface(Property):
                 "Stacking_Fault_E(J/m^2)\tEpA(eV)\tslab_equi_EpA(eV)\n"
             )
             all_tasks.sort()
+            disp_info_ref = loadfn(os.path.join(all_tasks[0], "displacement.json"))
+            if (
+                abs(float(disp_info_ref["frac_x"])) > 1e-12
+                or abs(float(disp_info_ref["frac_y"])) > 1e-12
+            ):
+                raise RuntimeError(
+                    f"GammaSurface reference task must be task.000000 with zero displacement, got {all_tasks[0]}"
+                )
             task_result_slab_equi = loadfn(os.path.join(all_tasks[0], "result_task.json"))
             if task_result_slab_equi is None:
                 raise RuntimeError(
@@ -535,6 +674,10 @@ class GammaSurface(Property):
                 disp_info = loadfn(os.path.join(ii, "displacement.json"))
                 frac_x = float(disp_info["frac_x"])
                 frac_y = float(disp_info["frac_y"])
+                if area <= self._VECTOR_TOL:
+                    raise RuntimeError(
+                        f"GammaSurface postprocess failed: task {ii} has non-positive fault area"
+                    )
                 cf = 1.60217657e-16 / 1e-20 * 0.001
                 sfe = (
                     (task_result["energies"][-1] - task_result_slab_equi["energies"][-1])
