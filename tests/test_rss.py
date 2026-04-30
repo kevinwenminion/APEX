@@ -831,11 +831,20 @@ class TestRSSInternalHelpers(unittest.TestCase):
         enriched = _normalize_sro_targets({"0": {"A-B": 0.2}}, 1, pair_keys)
         self.assertIn(("A", "B"), enriched[0])
 
-        with self.assertRaises(RSSInputError):
+        with self.assertRaisesRegex(
+            RSSInputError,
+            r"Configured shell_cutoffs define 1 shell\(s\), so valid keys are: shell0",
+        ):
             _normalize_sro_targets({"shell3": {"A-A": 0.1}}, 1, pair_keys)
 
         with self.assertRaises(RSSInputError):
             _normalize_sro_targets({"shell0": 1.0}, 1, pair_keys)
+
+        with self.assertRaisesRegex(
+            RSSInputError,
+            r"expected shell0, shell1, \.\.\. or 0, 1, \.\.\.",
+        ):
+            _normalize_sro_targets({"shellA": {"A-A": 0.1}}, 1, pair_keys)
 
     def test_normalize_shell_weights_valid_values(self):
         weights = _normalize_shell_weights([1.0, 2.0], [0.5, 1.5])

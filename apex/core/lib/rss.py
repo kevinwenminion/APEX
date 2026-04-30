@@ -362,15 +362,29 @@ def _normalize_sro_targets(
 
     normalized = {sid: {} for sid in range(nshells)}
     for shell_key, shell_target in sro_targets.items():
-        if isinstance(shell_key, str):
-            if shell_key.startswith("shell"):
-                shell_id = int(shell_key[5:])
+        try:
+            if isinstance(shell_key, str):
+                if shell_key.startswith("shell"):
+                    shell_id = int(shell_key[5:])
+                else:
+                    shell_id = int(shell_key)
             else:
                 shell_id = int(shell_key)
-        else:
-            shell_id = int(shell_key)
+        except (TypeError, ValueError) as exc:
+            raise RSSInputError(
+                "Invalid sro_targets shell key "
+                f"{shell_key!r}; expected shell0, shell1, ... or 0, 1, ..."
+            ) from exc
         if shell_id < 0 or shell_id >= nshells:
-            raise RSSInputError(f"Invalid shell index in sro_targets: {shell_key}")
+            if nshells == 0:
+                valid_shells = "none"
+            else:
+                valid_shells = ", ".join(f"shell{sid}" for sid in range(nshells))
+            raise RSSInputError(
+                "Invalid shell index in sro_targets: "
+                f"{shell_key}. Configured shell_cutoffs define {nshells} shell(s), "
+                f"so valid keys are: {valid_shells}"
+            )
         if not isinstance(shell_target, dict):
             raise RSSInputError(f"SRO target for shell {shell_key} must be dict")
         for pair_key, val in shell_target.items():
